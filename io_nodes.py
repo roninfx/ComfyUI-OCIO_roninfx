@@ -66,7 +66,7 @@ from PIL import Image
 
 from .nodes import (_apply_processor, _cached_cpu_processor, _colorspace_names,
                     _combo_or_string, _input_dir, _logc3_to_lin, _logc4_to_lin,
-                    _require_ocio, _resolve_config_keyed, _scan_files, _video_unwrap)
+                    _names, _require_ocio, _resolve_config_keyed, _scan_files, _video_unwrap)
 
 try:
     import folder_paths
@@ -3129,15 +3129,67 @@ def _cs_combo(default):
     return _combo_or_string(_colorspace_names(), default, "Colorspace from the active OCIO (ACES) config.")
 
 
-def _save_preview_png(frame0, filename):
+VIEW_NONE = "(none - raw)"   # sentinel for the preview-only viewer LUT pickers
+
+
+def _view_display_input():
+    return _combo_or_string([VIEW_NONE] + (_names(lambda c: list(c.getDisplays())) or []), VIEW_NONE,
+                            "Viewer LUT display for the on-node preview ONLY - does NOT change the written file.")
+
+
+def _view_transform_input():
+    def union(c):
+        vs = []
+        for d in c.getDisplays():
+            for v in c.getViews(d):
+                if v not in vs:
+                    vs.append(v)
+        return vs
+    return _combo_or_string([VIEW_NONE] + (_names(union) or []), VIEW_NONE,
+                            "Viewer LUT view for the on-node preview ONLY. Set both this and view_display to see it.")
+
+
+def _apply_view_lut(arr, src_cs, display, view):
+    """Viewer LUT for a PREVIEW frame: src_cs -> (display, view). Returns arr untouched if the pair is unset
+    or cannot be resolved, so a preview transform can never break a read or a write.
+
+    The display/view may belong to ANY config in the input folder (an ACES 1.x config while the DEFAULT is
+    ACES 2.0, say), so the owning config is SEARCHED for rather than assumed - otherwise the transform
+    silently no-ops and it looks like the LUT simply does not work.
+    """
+    if not display or not view or display == VIEW_NONE or view == VIEW_NONE:
+        return arr
+    try:
+        import PyOpenColorIO as OCIO
+        from .nodes import _config_from_choice_keyed, _cached_cpu_processor
+        for choice in [""] + list(_scan_files({".ocio"})):
+            cfg, cfg_key = _config_from_choice_keyed(choice)
+            if cfg is None:
+                continue
+            if display not in list(cfg.getDisplays()) or view not in list(cfg.getViews(display)):
+                continue
+            cpu = _cached_cpu_processor(
+                cfg_key, ("previewview", src_cs, display, view),
+                lambda c=cfg: c.getProcessor(
+                    OCIO.DisplayViewTransform(src=src_cs or "ACEScg", display=display, view=view)))
+            t = torch.from_numpy(np.ascontiguousarray(np.asarray(arr, np.float32)))[None]
+            return _apply_processor(t, cpu)[0].numpy()
+    except Exception:
+        pass
+    return arr
+
+
+def _save_preview_png(frame0, filename, src_cs=None, display=None, view=None):
     """Save one frame as an 8-bit PNG to the ComfyUI temp dir and return the ComfyUI ui 'images' list. Shared by
-    OCIORead._preview and OCIOWrite._preview (same shape: naive display of the frame in its own colorspace)."""
+    OCIORead._preview and OCIOWrite._preview. With display+view set the frame is shown through that viewer LUT
+    (preview only - the written file is never touched); without, it is the previous naive display."""
     if folder_paths is None:
         return []
     tdir = folder_paths.get_temp_directory()
     os.makedirs(tdir, exist_ok=True)
     if hasattr(frame0, "detach"):                 # torch Tensor (OCIORead passes rgb[0]); OCIOWrite passes numpy
         frame0 = frame0.detach().cpu().numpy()
+    frame0 = _apply_view_lut(np.asarray(frame0, np.float32), src_cs, display, view)
     px = (np.clip(np.asarray(frame0, np.float32), 0.0, 1.0) * 255.0).astype(np.uint8)
     Image.fromarray(px).save(os.path.join(tdir, filename))
     return [{"filename": filename, "subfolder": "", "type": "temp"}]
@@ -3472,6 +3524,13 @@ class OCIOWrite:
             # OPTIONAL input that way, whereas a missing REQUIRED one is a hard error).
             "write_audio": ("BOOLEAN", {"default": True,
                             "tooltip": "OFF: no sound at all, no muxed track and no sidecar .wav, even when one is wired or a native Video input brings its own. ON: the wired input wins, else the Video input's track. Off for a picture-only master."}),
+            # Viewer LUT for THIS NODE'S PREVIEW ONLY - the written file is never affected. A scene-linear
+            # EXR is correct on disk but looks wrong shown naively, so the preview borrows the viewing
+            # transform the way a Nuke Viewer does. APPENDED AFTER write_audio for the same positional
+            # reason stated above: widgets_values is positional, so a new widget must be LAST or every
+            # value after it shifts in workflows saved before it existed.
+            "view_display": _view_display_input(),
+            "view_transform": _view_transform_input(),
         }}
 
     RETURN_TYPES = ("STRING",)
@@ -3487,7 +3546,8 @@ class OCIOWrite:
               bit_depth, auto_range, first_frame, last_frame, start_number, source_start, raw_data,
               output_folder, filename, colorspace_in_name=True, auto_colorspace=True, compression="zip",
               alpha=None, fps=24.0, render_nonce="", images=None, video=None, audio=None,
-              metadata="", write_audio=True):   # render_nonce: cache-buster (see INPUT_TYPES). images/video: mutually-exclusive inputs.
+              metadata="", write_audio=True,
+              view_display=VIEW_NONE, view_transform=VIEW_NONE):   # render_nonce: cache-buster (see INPUT_TYPES). images/video: mutually-exclusive inputs. view_*: preview-only LUT.
         if video is not None:                                        # a native ComfyUI VIDEO -> render it out with ALL these Write settings (container, codec, colorspace, bit depth)
             images, _vfps, _vaudio = _video_unwrap(video)
             if _vfps and _vfps > 0:
@@ -3822,12 +3882,14 @@ class OCIOWrite:
             ui["images"] = self._video_preview(sub, fps, saved, apcm)      # apcm, not the raw AUDIO: it is already cut to this write's range, so the preview cannot disagree with the master about where the clip starts
             ui["animated"] = (True,)
         else:
-            ui["images"] = self._preview(preview)
+            # the preview frame is in output_colorspace (or raw = from_colorspace); that is the LUT's source
+            ui["images"] = self._preview(preview, (from_colorspace if raw_data else output_colorspace),
+                                         view_display, view_transform)
         return {"ui": ui, "result": (saved,)}
 
-    def _preview(self, frame0):
+    def _preview(self, frame0, src_cs=None, display=None, view=None):
         """First written frame, shown naively in its output colorspace (a wrong pick looks visibly wrong)."""
-        return _save_preview_png(frame0, "ocio_write_preview.png")
+        return _save_preview_png(frame0, "ocio_write_preview.png", src_cs, display, view)
 
     def _video_preview(self, arr, fps, seed="", audio_pcm=None):
         """A small, always-servable H.264 preview of the just-written clip, in ComfyUI's TEMP dir, for the node's

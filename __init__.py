@@ -207,6 +207,11 @@ try:
         in_cs = request.rel_url.query.get("in_cs", "")
         out_cs = request.rel_url.query.get("out_cs", "")
         raw = request.rel_url.query.get("raw", "0") == "1"
+        # VIEWER LUT (display + view), applied to the THUMBNAIL ONLY - never to what the node outputs.
+        # A Read holding raw scene-linear is correct on disk but looks wrong shown naively; Nuke keeps the
+        # LUT in the Viewer for exactly this reason. Sent by the front end from view-only widgets.
+        vdisp = request.rel_url.query.get("vdisp", "")
+        vview = request.rel_url.query.get("vview", "")
         full = request.rel_url.query.get("full", "0") == "1"      # original mode: full-res (proxy = downscaled 512)
         max_side = 8192 if full else 512                          # thumb_frame never upscales, so 8192 = "as-is" up to 8K
         try:
@@ -232,6 +237,9 @@ try:
                     rgb = _convert(t, in_cs, out_cs)[0].numpy()
                 except RuntimeError:
                     pass   # OCIO lib/config unavailable (_require_ocio) - pass the pixels through, same as raw=1
+            if vdisp and vview:
+                from .io_nodes import _apply_view_lut
+                rgb = _apply_view_lut(rgb, (out_cs if (not raw and out_cs) else in_cs), vdisp, vview)
             png8 = (np.clip(rgb, 0.0, 1.0) * 255.0).astype(np.uint8)
             ok, buf = cv2.imencode(".png", png8[..., ::-1])   # RGB -> BGR for cv2
             if not ok:

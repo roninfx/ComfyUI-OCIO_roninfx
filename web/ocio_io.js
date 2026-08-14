@@ -509,7 +509,7 @@ function _startViewport(node, p, src) {
 // runs from that cache. Frame numbers <-> 0-based index via _seqBase (orig_start). Added 2026-07-03.
 function _seqCsSig(node) {
     return (W(node, "input_colorspace")?.value || "") + "|" + (W(node, "output_colorspace")?.value || "") +
-           "|" + (W(node, "raw_data")?.value ? "1" : "0");
+           "|" + (W(node, "raw_data")?.value ? "1" : "0") + "|" + _viewSig(node);   // view LUT is part of the cache key
 }
 function _seqUrl(p, idx) {
     const node = p.node, base = (p.seq.origStart | 0);
@@ -517,6 +517,7 @@ function _seqUrl(p, idx) {
         src: p.seq.src, frame: String(base + (idx | 0)),
         in_cs: W(node, "input_colorspace")?.value || "", out_cs: W(node, "output_colorspace")?.value || "",
         raw: W(node, "raw_data")?.value ? "1" : "0",
+        ..._viewParams(node),                            // viewer LUT: flipbook frames get it too
         full: p.original ? "1" : "0",                    // original = full-res thumb, proxy = 512px
     }).toString();
 }
@@ -605,9 +606,23 @@ function _stopViewport(p) {
     if (p.transport) p.transport.bar.style.display = "none";
     p.canvas.style.display = "none"; p.video.style.display = "none"; p.streamUrl = "";
 }
+// ---- Viewer LUT (VIEW-ONLY). display + view for this node's own preview, exactly like a Nuke Viewer's LUT:
+// the Read still emits raw scene-linear and these only ever reach /ocio/thumb. serialize:false, so they are
+// not node inputs and cannot change what the graph computes.
+const VIEW_NONE = "(none - raw)";
+function _viewParams(node) {
+    const d = W(node, "view_display")?.value || "", v = W(node, "view_transform")?.value || "";
+    if (!d || !v || d === VIEW_NONE || v === VIEW_NONE) return {};
+    return { vdisp: d, vview: v };
+}
+function _viewSig(node) {
+    const p = _viewParams(node);
+    return (p.vdisp || "") + "|" + (p.vview || "");
+}
 function _thumbQuery(node, src) {
     return new URLSearchParams({ src, in_cs: W(node, "input_colorspace")?.value || "", out_cs: W(node, "output_colorspace")?.value || "",
-        raw: W(node, "raw_data")?.value ? "1" : "0", full: node._ocioPrev?.original ? "1" : "0", rand: String(Date.now()) }).toString();
+        raw: W(node, "raw_data")?.value ? "1" : "0", full: node._ocioPrev?.original ? "1" : "0",
+        ..._viewParams(node), rand: String(Date.now()) }).toString();
 }
 // ---- Nuke-style transport bar for the video viewport (client-side, drives the hidden <video>; the WebGL loop
 // renders whatever frame it lands on). A numbered timeline ruler (0..fileFrames-1) with a draggable playhead and
@@ -2474,6 +2489,22 @@ app.registerExtension({
                     self.setDirtyCanvas(true, true);
                 }, { serialize: false });
                 viewerToggle._ocioAlwaysVisible = true;
+                // Viewer LUT (VIEW-ONLY): a display + view pair applied to THIS node's preview only. Nuke keeps
+                // the LUT in the Viewer, not the Read, so these must never become node inputs or the Read would
+                // stop emitting raw scene-linear. Options are lifted from the OCIODisplay node definition, so
+                // they list whatever configs are actually loaded.
+                const _optsOf = (t, k) => {
+                    const s = (LiteGraph.registered_node_types?.[t]?.nodeData?.input?.required || {})[k];
+                    return Array.isArray(s?.[0]) ? s[0].slice() : [];
+                };
+                const _onViewChange = () => { try { updateReadPreview(self); } catch (e) {} };
+                const _dispW = this.addWidget("combo", "view_display", VIEW_NONE, _onViewChange,
+                    { values: [VIEW_NONE, ..._optsOf("OCIODisplay", "display")], serialize: false,
+                      tooltip: "Viewer LUT display for this node's preview ONLY - does NOT change what the node outputs." });
+                const _viewW = this.addWidget("combo", "view_transform", VIEW_NONE, _onViewChange,
+                    { values: [VIEW_NONE, ..._optsOf("OCIODisplay", "view")], serialize: false,
+                      tooltip: "Viewer LUT view for this node's preview ONLY. Set both this and view_display to see it." });
+                _dispW._ocioAlwaysVisible = true; _viewW._ocioAlwaysVisible = true;
                 ensureReadPreview(this);                                          // instant preview at the bottom
                 // Metadata: its OWN disclosure, below the viewer, built to match it - same chevron, down when
                 // open and right when closed. It used to fold away with the Viewer, which tied "I want to see
