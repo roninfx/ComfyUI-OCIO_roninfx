@@ -73,7 +73,22 @@ try:
 except Exception:
     folder_paths = None
 
-_FFMPEG = shutil.which("ffmpeg") or "ffmpeg"     # relies on ffmpeg being on PATH (see README)
+def _imageio_ffmpeg():
+    """The ffmpeg shipped with imageio-ffmpeg, or None.
+
+    Many ComfyUI installs already have this (VideoHelperSuite and friends depend on it) but it lives
+    inside site-packages, NOT on PATH - so a PATH-only lookup reports 'no ffmpeg' on a machine that
+    plainly has a working one, and tells the user to install what they already have.
+    """
+    try:
+        import imageio_ffmpeg
+        exe = imageio_ffmpeg.get_ffmpeg_exe()
+        return exe if exe and os.path.isfile(exe) else None
+    except Exception:
+        return None
+
+
+_FFMPEG = shutil.which("ffmpeg") or _imageio_ffmpeg() or "ffmpeg"     # relies on ffmpeg being on PATH (see README)
 # ffprobe sits beside ffmpeg; derive only the basename so a directory containing "ffmpeg" is left intact.
 _dir = os.path.dirname(_FFMPEG)
 _FFPROBE = shutil.which("ffprobe") or (os.path.join(_dir, "ffprobe.exe") if _dir else "ffprobe")
