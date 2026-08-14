@@ -226,13 +226,37 @@ def _lut_path(choice):
 
 
 def _names(getter):
+    """Names for a combo, UNIONED across the default config AND every .ocio in the input folder.
+
+    INPUT_TYPES is evaluated once per node CLASS, before any node instance (and therefore any per-node
+    `config_path`) exists, so a combo built from the default config alone can only ever offer the default
+    config's names. Picking a different `config_path` then left the widget offering names that do not exist
+    in the chosen config - the node validated fine and failed at execution. Unioning means a colorspace /
+    display / view / look from ANY config the user has dropped in input/ is selectable, and `config_path`
+    decides which one is actually used at run time. Order is preserved: default config first, so existing
+    graphs keep their current defaults.
+    """
+    out, seen = [], set()
+    cfgs = []
     cfg = _resolve_config("")
-    if cfg is None:
-        return None
-    try:
-        return getter(cfg)
-    except Exception:
-        return None
+    if cfg is not None:
+        cfgs.append(cfg)
+    for rel in _scan_files({".ocio"}):                   # user-supplied configs in the ComfyUI input folder
+        try:
+            extra, _ = _config_from_choice_keyed(rel)
+            if extra is not None:
+                cfgs.append(extra)
+        except Exception:
+            continue                                     # an unreadable config must not break the node menus
+    for c in cfgs:
+        try:
+            for n in (getter(c) or []):
+                if n not in seen:
+                    seen.add(n)
+                    out.append(n)
+        except Exception:
+            continue
+    return out or None
 
 
 def _colorspace_names():

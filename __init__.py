@@ -187,6 +187,12 @@ try:
         in_cs = request.rel_url.query.get("in_cs", "")
         out_cs = request.rel_url.query.get("out_cs", "")
         raw = request.rel_url.query.get("raw", "0") == "1"
+        # VIEW TRANSFORM (display + view), applied to the THUMBNAIL ONLY - never to what the node outputs.
+        # This is the Nuke Viewer-LUT idea: a Read holds raw scene-linear, and the LUT is a viewing decision.
+        # Sent by the front end from view-only widgets, so the node keeps emitting untouched linear.
+        vdisp = request.rel_url.query.get("vdisp", "")
+        vview = request.rel_url.query.get("vview", "")
+        vcfg = request.rel_url.query.get("vcfg", "")              # which config the display/view belong to
         full = request.rel_url.query.get("full", "0") == "1"      # original mode: full-res (proxy = downscaled 512)
         max_side = 8192 if full else 512                          # thumb_frame never upscales, so 8192 = "as-is" up to 8K
         try:
@@ -212,6 +218,34 @@ try:
                     rgb = _convert(t, in_cs, out_cs)[0].numpy()
                 except RuntimeError:
                     pass   # OCIO lib/config unavailable (_require_ocio) - pass the pixels through, same as raw=1
+            # Viewer LUT: display + view applied AFTER any colorspace step, thumbnail only. Runs even when
+            # raw_data is on - that is the whole point, a raw scene-linear Read still previews through the LUT.
+            if vdisp and vview:
+                try:
+                    import PyOpenColorIO as _OCIO
+                    from .nodes import (_config_from_choice_keyed, _apply_processor,
+                                        _cached_cpu_processor, _scan_files)
+                    # Resolve the config that actually OWNS this display+view. An explicit vcfg wins; with
+                    # none (the front end could not offer a picker) fall back to whichever config in the
+                    # input folder defines them, so an ACES 1.x view still resolves while the DEFAULT config
+                    # is ACES 2.0 - otherwise the transform silently no-ops and the LUT appears not to work.
+                    cands = [vcfg] if vcfg else [""] + list(_scan_files({".ocio"}))
+                    for choice in cands:
+                        cfg, cfg_key = _config_from_choice_keyed(choice or "")
+                        if cfg is None:
+                            continue
+                        if vdisp not in list(cfg.getDisplays()) or vview not in list(cfg.getViews(vdisp)):
+                            continue                      # this config does not define them - try the next
+                        src_cs = (out_cs if (not raw and out_cs) else in_cs) or "ACEScg"
+                        cpu = _cached_cpu_processor(
+                            cfg_key, ("thumbview", src_cs, vdisp, vview),
+                            lambda c=cfg, s=src_cs: c.getProcessor(
+                                _OCIO.DisplayViewTransform(src=s, display=vdisp, view=vview)))
+                        t = torch.from_numpy(np.ascontiguousarray(rgb.astype(np.float32)))[None]
+                        rgb = _apply_processor(t, cpu)[0].numpy()
+                        break
+                except Exception:
+                    pass   # an unresolvable display/view (e.g. a config whose LUTs are missing) must not 404 the thumb
             png8 = (np.clip(rgb, 0.0, 1.0) * 255.0).astype(np.uint8)
             ok, buf = cv2.imencode(".png", png8[..., ::-1])   # RGB -> BGR for cv2
             if not ok:

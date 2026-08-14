@@ -59,18 +59,63 @@ try:
     import tifffile
 except Exception:
     tifffile = None
+# OpenImageIO: the VFX-standard I/O library, and the only backend here that reads EXR (every
+# compression incl. DWAA/DWAB), DPX and float TIFF through one path. Needed because many
+# opencv-python wheels (e.g. 5.0.0) are built with "OpenEXR: NO", so cv2.imread returns None for
+# EVERY .exr and OPENCV_IO_ENABLE_OPENEXR cannot help - the codec is simply absent from the build.
+# Upstream 05b4def fixed the WRITE side via the OpenEXR module; this is the matching read side.
+try:
+    import OpenImageIO as _oiio
+except Exception:
+    _oiio = None
 from PIL import Image
 
 from .nodes import (_apply_processor, _cached_cpu_processor, _colorspace_names,
                     _combo_or_string, _input_dir, _logc3_to_lin, _logc4_to_lin,
-                    _require_ocio, _resolve_config_keyed, _scan_files, _video_unwrap)
+                    _names, _require_ocio, _resolve_config_keyed, _scan_files, _video_unwrap)
+
+# Sentinel for the preview-only viewer LUT pickers: the LUT is off unless BOTH are set to real values.
+VIEW_NONE = "(none - raw)"
+
+
+def _view_display_input():
+    return _combo_or_string([VIEW_NONE] + (_names(lambda c: list(c.getDisplays())) or []), VIEW_NONE,
+                            "Viewer LUT display for the on-node preview ONLY - does NOT change the written file.")
+
+
+def _view_transform_input():
+    def union(c):
+        vs = []
+        for d in c.getDisplays():
+            for v in c.getViews(d):
+                if v not in vs:
+                    vs.append(v)
+        return vs
+    return _combo_or_string([VIEW_NONE] + (_names(union) or []), VIEW_NONE,
+                            "Viewer LUT view for the on-node preview ONLY. Set both this and view_display to see it.")
 
 try:
     import folder_paths
 except Exception:
     folder_paths = None
 
-_FFMPEG = shutil.which("ffmpeg") or "ffmpeg"     # relies on ffmpeg being on PATH (see README)
+def _imageio_ffmpeg():
+    """The ffmpeg binary shipped with imageio-ffmpeg, or None.
+
+    Many ComfyUI installs already have this (VideoHelperSuite and friends depend on it) but it lives inside
+    site-packages, NOT on PATH - so a PATH-only lookup reports 'no ffmpeg' on a machine that plainly has a
+    working one. Falling back to it makes video Write work out of the box instead of demanding a separate
+    system install.
+    """
+    try:
+        import imageio_ffmpeg
+        exe = imageio_ffmpeg.get_ffmpeg_exe()
+        return exe if exe and os.path.isfile(exe) else None
+    except Exception:
+        return None
+
+
+_FFMPEG = shutil.which("ffmpeg") or _imageio_ffmpeg() or "ffmpeg"   # PATH first, then the bundled wheel
 # ffprobe sits beside ffmpeg; derive only the basename so a directory containing "ffmpeg" is left intact.
 _dir = os.path.dirname(_FFMPEG)
 _FFPROBE = shutil.which("ffprobe") or (os.path.join(_dir, "ffprobe.exe") if _dir else "ffprobe")
@@ -81,9 +126,11 @@ def _require_ffmpeg():
     message if it is not installed, rather than a cryptic FileNotFoundError. Stills need no ffmpeg."""
     if shutil.which("ffmpeg") is None and not os.path.isfile(_FFMPEG):
         raise RuntimeError(
-            "Video needs ffmpeg on your PATH (a full build, for ProRes / DNxHR / h264 / hevc). Install it from "
-            "gyan.dev (Windows), 'brew install ffmpeg' (macOS) or your package manager, then restart ComfyUI. "
-            "Stills and image sequences (EXR / TIFF / PNG / JPEG) work without ffmpeg.")
+            "Video needs ffmpeg (a full build, for ProRes / DNxHR / h264 / hevc). None was found on PATH, and "
+            "the imageio-ffmpeg fallback is not installed either. Fix with EITHER: pip install imageio-ffmpeg "
+            "(no PATH change needed), OR a system ffmpeg from gyan.dev (Windows) / 'brew install ffmpeg' "
+            "(macOS) / your package manager. Restart ComfyUI afterwards. Stills and image sequences "
+            "(EXR / TIFF / PNG / JPEG) work without ffmpeg.")
 
 
 STILL_EXTS = (".exr", ".hdr", ".tif", ".tiff", ".png", ".jpg", ".jpeg", ".bmp", ".dpx")
@@ -109,17 +156,58 @@ def _auto_output_cs(container, still_format):
 
 # --------------------------------------------------------------------------- loading
 
+def _oiio_read(path):
+    """One EXR / DPX / float TIFF -> float32 [H,W,C], channels resolved BY NAME to R,G,B[,A].
+
+    Tried before cv2 for float formats. Values pass through untouched - scene-linear may exceed 1 and
+    may be negative, and half is widened to float32 without quantisation. Resolving by channel NAME
+    means a file declaring B,G,R still lands as R,G,B, so there is no BGR swap to undo.
+    """
+    if _oiio is None:
+        return None
+    inp = None
+    try:
+        inp = _oiio.ImageInput.open(path)
+        if inp is None:
+            return None
+        names = list(inp.spec().channelnames)
+        px = np.asarray(inp.read_image(format="float"))
+        if px is None or px.ndim != 3:
+            return None
+        idx = {n.upper(): i for i, n in enumerate(names)}
+        if {"R", "G", "B"} <= set(idx):
+            order = [idx["R"], idx["G"], idx["B"]] + ([idx["A"]] if "A" in idx else [])
+            px = px[..., order]
+        elif px.shape[2] == 1:                           # lone Y / depth / mask pass -> replicate to RGB
+            px = np.repeat(px, 3, axis=2)
+        return np.ascontiguousarray(px).astype(np.float32)
+    except Exception:
+        return None
+    finally:
+        if inp is not None:
+            try:
+                inp.close()
+            except Exception:
+                pass
+
+
 def _read_still(path):
     """One still -> float32 RGBA [H,W,4] (alpha 1.0 if the file has none). Integer formats normalise to 0..1
     (alpha too); float (EXR / float TIFF) keeps its real range (scene-linear values can exceed 1)."""
     ext = os.path.splitext(path)[1].lower()
     a, bgr = None, False
     if ext in (".exr", ".hdr", ".dpx"):
-        if cv2 is not None:
+        a = _oiio_read(path)                             # already R,G,B[,A] - leave bgr False
+        if a is None and cv2 is not None:
             a = cv2.imread(path, cv2.IMREAD_UNCHANGED | cv2.IMREAD_ANYDEPTH)
-            bgr = True
+            bgr = a is not None
         if a is None and ext in (".exr", ".hdr"):
-            raise RuntimeError(f"cv2 could not read {path} (set OPENCV_IO_ENABLE_OPENEXR=1 on the server).")
+            raise RuntimeError(
+                f"Could not read {path}. OpenImageIO is "
+                f"{'not installed' if _oiio is None else 'installed but could not decode it'}, and cv2 "
+                f"{'is missing' if cv2 is None else 'has no EXR codec in this build'} - note that when "
+                f"cv2.getBuildInformation() reports 'OpenEXR: NO', setting OPENCV_IO_ENABLE_OPENEXR has "
+                f"no effect. Install the reader with: python -m pip install OpenImageIO")
     elif ext in (".tif", ".tiff") and tifffile is not None:
         a = np.asarray(tifffile.imread(path))
     elif ext in (".png", ".bmp") and cv2 is not None:
@@ -632,8 +720,10 @@ def _still_shape_alpha(path):
     count off the decoded array before any padding."""
     ext = os.path.splitext(path)[1].lower()
     a, bands = None, None
-    if ext in (".exr", ".hdr", ".dpx") and cv2 is not None:
-        a = cv2.imread(path, cv2.IMREAD_UNCHANGED | cv2.IMREAD_ANYDEPTH)
+    if ext in (".exr", ".hdr", ".dpx"):
+        a = _oiio_read(path)                             # same decode path as _read_still
+        if a is None and cv2 is not None:
+            a = cv2.imread(path, cv2.IMREAD_UNCHANGED | cv2.IMREAD_ANYDEPTH)
     elif ext in (".tif", ".tiff") and tifffile is not None:
         a = np.asarray(tifffile.imread(path))
     if a is None:
@@ -999,15 +1089,48 @@ def _cs_combo(default):
     return _combo_or_string(_colorspace_names(), default, "Colorspace from the active OCIO (ACES) config.")
 
 
-def _save_preview_png(frame0, filename):
+def _apply_view_lut(arr, src_cs, display, view):
+    """Viewer LUT for a PREVIEW frame: src_cs -> (display, view). Returns arr untouched if the pair is unset or
+    cannot be resolved. Mirrors the /ocio/thumb viewer LUT so OCIOWrite's on-node preview matches OCIORead's.
+
+    The display/view may belong to ANY config the user has in the input folder (an ACES 1.x config while the
+    DEFAULT is ACES 2.0, say), so the owning config is searched for rather than assumed - otherwise the
+    transform silently no-ops and the preview looks like no LUT was applied at all.
+    """
+    if not display or not view:
+        return arr
+    try:
+        import PyOpenColorIO as OCIO
+        from .nodes import (_config_from_choice_keyed, _apply_processor,
+                            _cached_cpu_processor, _scan_files)
+        for choice in [""] + list(_scan_files({".ocio"})):
+            cfg, cfg_key = _config_from_choice_keyed(choice)
+            if cfg is None:
+                continue
+            if display not in list(cfg.getDisplays()) or view not in list(cfg.getViews(display)):
+                continue
+            cpu = _cached_cpu_processor(
+                cfg_key, ("previewview", src_cs, display, view),
+                lambda c=cfg: c.getProcessor(
+                    OCIO.DisplayViewTransform(src=src_cs or "ACEScg", display=display, view=view)))
+            t = torch.from_numpy(np.ascontiguousarray(np.asarray(arr, np.float32)))[None]
+            return _apply_processor(t, cpu)[0].numpy()
+    except Exception:
+        pass                                      # never let a preview transform break the write itself
+    return arr
+
+
+def _save_preview_png(frame0, filename, src_cs=None, display=None, view=None):
     """Save one frame as an 8-bit PNG to the ComfyUI temp dir and return the ComfyUI ui 'images' list. Shared by
-    OCIORead._preview and OCIOWrite._preview (same shape: naive display of the frame in its own colorspace)."""
+    OCIORead._preview and OCIOWrite._preview. With display+view set, the frame is shown through that viewer LUT
+    (preview only - the written file is never affected); without, it is the previous naive display."""
     if folder_paths is None:
         return []
     tdir = folder_paths.get_temp_directory()
     os.makedirs(tdir, exist_ok=True)
     if hasattr(frame0, "detach"):                 # torch Tensor (OCIORead passes rgb[0]); OCIOWrite passes numpy
         frame0 = frame0.detach().cpu().numpy()
+    frame0 = _apply_view_lut(np.asarray(frame0, np.float32), src_cs, display, view)
     px = (np.clip(np.asarray(frame0, np.float32), 0.0, 1.0) * 255.0).astype(np.uint8)
     Image.fromarray(px).save(os.path.join(tdir, filename))
     return [{"filename": filename, "subfolder": "", "type": "temp"}]
@@ -1187,6 +1310,13 @@ class OCIOWrite:
                               "tooltip": "Video frame rate. Wire OCIO Read's fps output here to carry the source rate."}),
             "render_nonce": ("STRING", {"default": "",
                              "tooltip": "(internal, hidden) The Render button bumps this so a repeat render to the SAME path actually re-writes - ComfyUI would otherwise cache an identical Write and skip it (no file written on the 2nd click). STRING so a blank value can never fail validation."}),
+            # Viewer LUT for THIS NODE'S PREVIEW ONLY - the written file is never affected. Same idea as the
+            # OCIO Read viewer LUT: a scene-linear output is correct on disk but looks wrong shown naively.
+            # APPENDED LAST ON PURPOSE: widgets_values is positional, so inserting anywhere earlier silently
+            # shifts every widget after it in workflows saved before this existed (fps landing in view_display,
+            # render_nonce in view_transform, ...). Only appending at the very end is backward compatible.
+            "view_display": _view_display_input(),
+            "view_transform": _view_transform_input(),
         }}
 
     RETURN_TYPES = ("STRING",)
@@ -1204,7 +1334,8 @@ class OCIOWrite:
     def write(self, profile, from_colorspace, output_colorspace, container, still_format, video_codec,
               bit_depth, auto_range, first_frame, last_frame, start_number, source_start, raw_data,
               output_folder, filename, colorspace_in_name=True, auto_colorspace=True, compression="zip",
-              alpha=None, fps=24.0, render_nonce="", images=None, video=None):   # render_nonce: cache-buster (see INPUT_TYPES). images/video: mutually-exclusive inputs.
+              alpha=None, fps=24.0, render_nonce="", images=None, video=None,
+              view_display=VIEW_NONE, view_transform=VIEW_NONE):   # render_nonce: cache-buster (see INPUT_TYPES). images/video: mutually-exclusive inputs. view_*: preview-only LUT.
         if video is not None:                                        # a native ComfyUI VIDEO -> render it out with ALL these Write settings (container, codec, colorspace, bit depth)
             images, _vfps, _ = _video_unwrap(video)
             if _vfps and _vfps > 0:
@@ -1281,12 +1412,17 @@ class OCIOWrite:
             ui["images"] = self._video_preview(sub, fps, saved)
             ui["animated"] = (True,)
         else:
-            ui["images"] = self._preview(preview)
+            # the preview frame is in output_colorspace (or raw = from_colorspace); that is the viewer LUT's source
+            ui["images"] = self._preview(preview, (from_colorspace if raw_data else output_colorspace),
+                                         view_display, view_transform)
         return {"ui": ui, "result": (saved,)}
 
-    def _preview(self, frame0):
-        """First written frame, shown naively in its output colorspace (a wrong pick looks visibly wrong)."""
-        return _save_preview_png(frame0, "ocio_write_preview.png")
+    def _preview(self, frame0, src_cs=None, display=None, view=None):
+        """First written frame. With a viewer LUT set, shown through it (preview only, the file is untouched);
+        otherwise shown naively in its output colorspace, so a wrong colorspace pick still looks visibly wrong."""
+        d = None if (not display or display == VIEW_NONE) else display
+        v = None if (not view or view == VIEW_NONE) else view
+        return _save_preview_png(frame0, "ocio_write_preview.png", src_cs, d, v)
 
     def _video_preview(self, arr, fps, seed=""):
         """A small, always-servable H.264 preview of the just-written clip, in ComfyUI's TEMP dir, for the node's
