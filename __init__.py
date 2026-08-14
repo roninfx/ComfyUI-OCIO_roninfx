@@ -20,6 +20,16 @@ NODE_DISPLAY_NAME_MAPPINGS.update(_IO_NAMES)
 # NODE_CLASS_MAPPINGS.update(_GRADE_CLASSES)
 # NODE_DISPLAY_NAME_MAPPINGS.update(_GRADE_NAMES)
 
+# roninfx build marker. DISPLAY names only - the class keys in NODE_CLASS_MAPPINGS are deliberately
+# untouched, because those are what a saved workflow stores as each node's type. Renaming a class key
+# would make every existing graph fail to load with "unknown node type", for us and for anyone we share
+# a workflow with. Suffixing the display name makes the patched build obvious in the node menu and on
+# the node body while staying 100% workflow-compatible with upstream.
+_RONINFX_SUFFIX = " (roninfx)"
+for _k, _v in list(NODE_DISPLAY_NAME_MAPPINGS.items()):
+    if not str(_v).endswith(_RONINFX_SUFFIX):
+        NODE_DISPLAY_NAME_MAPPINGS[_k] = f"{_v}{_RONINFX_SUFFIX}"
+
 # Front-end assets: the 'swap' button, the 'upload' buttons, and the Read/Write IO helpers (auto-colorspace,
 # Render button, folder browse, colorspace label).
 WEB_DIRECTORY = "./web"
