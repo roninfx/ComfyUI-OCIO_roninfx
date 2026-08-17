@@ -818,6 +818,11 @@ class OCIOColorSpace:
                         # ~0.7 s/frame), which is paid on every render whether the viewer is opened
                         # or not. This answers the same question, "what does frame N look like",
                         # for nothing. 0 = first frame. Out-of-range clamps rather than errors.
+                        # The preview OFF SWITCH, and a real one: convert() skips rendering entirely, so
+                        # nothing is encoded and nothing is written. Distinct from the "▾ Viewer" fold, which
+                        # is a FRONT-END state - it hides what was already made and saves nothing at all.
+                        "preview": ("BOOLEAN", {"default": True,
+                                    "tooltip": "Render this node's on-node preview. OFF skips it entirely - no image encoded, no file written. The ▾ Viewer button only HIDES a preview that was already made; this is what actually saves the work."}),
                         "preview_frame": ("INT", {"default": 0, "min": 0, "max": 100000000,
                                           "tooltip": "Which frame the on-node preview shows, as a 0-based index into the batch (0 = first). Clamped to the last frame if higher. Preview only - it changes nothing about the data, and costs nothing, because one frame is rendered either way."})},
                 "hidden": {"unique_id": "UNIQUE_ID"}}
@@ -830,7 +835,7 @@ class OCIOColorSpace:
     CATEGORY = "OCIO"
 
     def convert(self, image=None, in_colorspace=None, out_colorspace=None, mix=1.0, config_path=BUILTIN,
-                video=None, view_display=None, view_transform=None, preview_frame=0, unique_id="0"):
+                video=None, view_display=None, view_transform=None, preview=True, preview_frame=0, unique_id="0"):
         _require_ocio()
         cfg, cfg_key = _config_from_choice_keyed(config_path)
         if cfg is None:
@@ -843,7 +848,8 @@ class OCIOColorSpace:
         # loaded, so a wrong in_colorspace stays invisible until something far downstream looks wrong.
         # ComfyUI forwards a "ui" payload from ANY node (execution.py gates on len(output_ui), not on
         # OUTPUT_NODE), so this needs no output-node status and does not change what executes.
-        ui = _preview_ui(out_img, out_colorspace, view_display, view_transform, f"ocio_cs_{unique_id}", preview_frame)
+        ui = (_preview_ui(out_img, out_colorspace, view_display, view_transform, f"ocio_cs_{unique_id}",
+                          preview_frame) if preview else None)
         return {"ui": ui, "result": (out_img, out_vid)} if ui else (out_img, out_vid)
 
 
