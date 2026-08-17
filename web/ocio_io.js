@@ -1217,8 +1217,23 @@ function syncWriteFromUpstream(node) {
     if (rFps) setWSilent(node, "fps", rFps);
     node.setDirtyCanvas(true, true);
 }
+// A processing node's PREVIEW mirrors the viewer LUT of the OCIO Read it is fed from, so one setting on the Read
+// governs how the whole chain is viewed - the same idea as fps and the frame range already riding downstream.
+// ONLY while the node is still at its default (none - raw): once a value is set here by hand it is left alone,
+// so a per-node override is never silently reverted. Nothing about the DATA changes; these are preview-only.
+function syncPreviewViewFromUpstream(node) {
+    const read = findUpstreamRead(node);
+    if (!read) return;
+    for (const nm of ["view_display", "view_transform"]) {
+        const w = W(node, nm), src = W(read, nm);
+        if (!w || !src || !src.value) continue;
+        if (w.value && w.value !== VIEW_NONE) continue;      // hand-set here: leave it
+        setWSilent(node, nm, src.value);
+    }
+}
 function resyncAllWrites() {
     for (const nd of (app.graph && app.graph._nodes) || []) {
+        if (OCIO_PROC_TYPES.has(nd.type)) syncPreviewViewFromUpstream(nd);
         if (nd.type === "OCIOWrite") syncWriteFromUpstream(nd);
         // The Player follows the upstream Read for the same reason a Write does - its timeline shows SOURCE
         // frame numbers, and `base` is what maps them back to batch indices. Without this it only re-synced
@@ -2934,5 +2949,52 @@ app.registerExtension({
                 ctx.restore();
             };
         }
+    },
+});
+
+// ---------------------------------------------------------------------------------------------------------
+// Processing nodes (OCIOColorSpace and friends) carry an on-node preview via a ComfyUI `ui.images` payload,
+// NOT the DOM widget OCIO Read builds - so the Read's "▾ Viewer" collapse cannot be reused. ComfyUI renders
+// that preview from node.imgs, so folding it is a matter of stashing that array and putting it back: no
+// re-render, no re-run, and the preview survives the round trip. Same chevron and label as the Read so the
+// two read as one control, and the same serialize:false, so it is runtime-only state and never enters the
+// prompt or the saved graph.
+app.registerExtension({
+    name: "ocio.proc.viewer.toggle",
+    async beforeRegisterNodeDef(nodeType, nodeData) {
+        if (!OCIO_PROC_TYPES.has(nodeData.name)) return;
+        const onCreated = nodeType.prototype.onNodeCreated;
+        nodeType.prototype.onNodeCreated = function () {
+            const r = onCreated ? onCreated.apply(this, arguments) : undefined;
+            const self = this;
+            const toggle = this.addWidget("button", "▾ Viewer", null, () => {
+                const c = self._ocioProcCollapsed = !self._ocioProcCollapsed;
+                if (typeof _setWidgetLabel === "function") _setWidgetLabel(toggle, (c ? "▸" : "▾") + " Viewer");
+                else toggle.name = (c ? "▸" : "▾") + " Viewer";
+                if (c) {
+                    // stash, do not discard - re-running just to see the preview again would be absurd
+                    if (self.imgs && self.imgs.length) self._ocioStashedImgs = self.imgs;
+                    self.imgs = null;
+                } else if (self._ocioStashedImgs) {
+                    self.imgs = self._ocioStashedImgs;
+                }
+                self.setSize([self.size[0], self.computeSize()[1]]);
+                self.setDirtyCanvas(true, true);
+            }, { serialize: false });
+            // Honour the fold when a NEW preview arrives while collapsed: onExecuted sets node.imgs, which would
+            // otherwise pop the viewport back open on the next run and quietly undo the user's choice.
+            const onExecuted = nodeType.prototype.onExecuted;
+            nodeType.prototype.onExecuted = function (msg) {
+                const res = onExecuted ? onExecuted.apply(this, arguments) : undefined;
+                if (this._ocioProcCollapsed && this.imgs && this.imgs.length) {
+                    this._ocioStashedImgs = this.imgs;
+                    this.imgs = null;
+                    this.setSize([this.size[0], this.computeSize()[1]]);
+                    this.setDirtyCanvas(true, true);
+                }
+                return res;
+            };
+            return r;
+        };
     },
 });
