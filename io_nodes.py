@@ -3391,13 +3391,48 @@ _VERSION_CACHE = {}
 _VERSION_CACHE_MAX = 64
 
 
+def _write_folders_in_prompt(prompt, name):
+    """Every folder an OCIO Write in THIS prompt will version `name` into, resolved the same way write() does.
+
+    Read off the prompt because the version must clear the LAST version ANYWHERE in the delivery, not just in
+    whichever folder happened to be scanned first. An EXR master in one directory sitting at v005 and its MP4
+    review in another at v009 must both come out v010 - scanning only the first would answer v006 and quietly
+    land behind the review that already exists.
+    """
+    out = []
+    try:
+        for spec in (prompt or {}).values():
+            if not isinstance(spec, dict) or spec.get("class_type") != "OCIOWrite":
+                continue
+            ins = spec.get("inputs") or {}
+            if not ins.get("auto_version", True):
+                continue
+            fn = ins.get("filename")
+            if not isinstance(fn, str) or fn.strip() != name:   # a wired filename is a link list, not a str
+                continue
+            try:
+                f = resolve_output_folder(ins.get("output_folder", "") or "")
+            except Exception:
+                continue
+            if f and f not in out:
+                out.append(f)
+    except Exception:
+        pass
+    return out
+
+
 def _shared_version(prompt, folder, name):
-    """The version for `name` in THIS execution: computed once, then reused by every other Write in the run."""
+    """The version for `name` in THIS execution: computed once, then reused by every other Write in the run.
+
+    One past the highest that exists in ANY folder this run will write `name` into - so every Write lands on
+    the same number AND that number clears everything already delivered.
+    """
     key = (id(prompt) if prompt is not None else 0, name)
     hit = _VERSION_CACHE.get(key)
     if hit is not None:
         return hit
-    v = _next_version(folder, name)
+    folders = [folder] + [f for f in _write_folders_in_prompt(prompt, name) if f != folder]
+    v = max([_next_version(f, name) for f in folders] or [1])
     if len(_VERSION_CACHE) >= _VERSION_CACHE_MAX:
         _VERSION_CACHE.clear()
     _VERSION_CACHE[key] = v
