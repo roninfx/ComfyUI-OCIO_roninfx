@@ -758,6 +758,44 @@ class OCIOLogConvert:
         return True
 
 
+PREVIEW_VIEW_NONE = "(none - raw)"   # sentinel: the preview LUT is off unless BOTH pickers are set
+
+
+def _preview_view_display():
+    return _combo_or_string([PREVIEW_VIEW_NONE] + (_names(lambda c: list(c.getDisplays())) or []),
+                            PREVIEW_VIEW_NONE,
+                            "Viewer LUT display for this node's PREVIEW ONLY - the data passed downstream is unchanged.")
+
+
+def _preview_view_transform():
+    def union(c):
+        vs = []
+        for d in c.getDisplays():
+            for v in c.getViews(d):
+                if v not in vs:
+                    vs.append(v)
+        return vs
+    return _combo_or_string([PREVIEW_VIEW_NONE] + (_names(union) or []), PREVIEW_VIEW_NONE,
+                            "Viewer LUT view for this node's PREVIEW ONLY. Set both this and view_display to see it.")
+
+
+def _preview_ui(img, src_cs, display, view, filename):
+    """{'images': [...]} for an on-node preview of `img`'s first frame, or None when there is nothing to show.
+
+    io_nodes imports FROM this module, so its helpers are imported lazily here rather than at module scope -
+    a top-level import would be circular. Any failure returns None: a preview must never break a conversion.
+    """
+    if img is None or not hasattr(img, "shape") or img.shape[0] < 1:
+        return None
+    d = None if (not display or display == PREVIEW_VIEW_NONE) else display
+    v = None if (not view or view == PREVIEW_VIEW_NONE) else view
+    try:
+        from .io_nodes import _save_preview_png
+        return {"images": _save_preview_png(img[0], f"{filename}.png", src_cs, d, v)}
+    except Exception:
+        return None
+
+
 class OCIOColorSpace:
     """Convert between two OCIO colorspaces (Nuke: OCIOColorSpace). 'swap in/out' button flips them."""
 
@@ -767,7 +805,13 @@ class OCIOColorSpace:
             "in_colorspace": _cs_input("ACES2065-1"),
             "out_colorspace": _cs_input("ACEScg"),
             "mix": _mix_input(),
-        }, "optional": {"image": ("IMAGE",), "video": ("VIDEO",), "config_path": _config_input()}}
+        }, "optional": {"image": ("IMAGE",), "video": ("VIDEO",), "config_path": _config_input(),
+                        # Viewer LUT for THIS NODE'S PREVIEW ONLY - the data passed downstream is never touched.
+                        # Appended LAST for the positional reason: widgets_values is ordered, so a new widget
+                        # anywhere earlier shifts every value after it in already-saved workflows.
+                        "view_display": _preview_view_display(),
+                        "view_transform": _preview_view_transform()},
+                "hidden": {"unique_id": "UNIQUE_ID"}}
 
     RETURN_TYPES = ("IMAGE", "VIDEO")
     RETURN_NAMES = ("image/sequence/video", "ComfyUI Video")
@@ -776,14 +820,22 @@ class OCIOColorSpace:
     FUNCTION = "convert"
     CATEGORY = "OCIO"
 
-    def convert(self, image=None, in_colorspace=None, out_colorspace=None, mix=1.0, config_path=BUILTIN, video=None):
+    def convert(self, image=None, in_colorspace=None, out_colorspace=None, mix=1.0, config_path=BUILTIN,
+                video=None, view_display=None, view_transform=None, unique_id="0"):
         _require_ocio()
         cfg, cfg_key = _config_from_choice_keyed(config_path)
         if cfg is None:
             raise RuntimeError("No OCIO config found.")
         tf_key = ("colorspace", in_colorspace, out_colorspace)
         cpu = _cached_cpu_processor(cfg_key, tf_key, lambda: cfg.getProcessor(in_colorspace, out_colorspace))
-        return _dual_io(lambda img: _blend(img, _apply_processor(img, cpu), mix), image, video)
+        out_img, out_vid = _dual_io(lambda img: _blend(img, _apply_processor(img, cpu), mix), image, video)
+        # On-node preview of the CONVERTED result, through an optional viewer LUT. This is the node that
+        # answers "is what leaves here actually in the working space?" - a Read preview only shows what was
+        # loaded, so a wrong in_colorspace stays invisible until something far downstream looks wrong.
+        # ComfyUI forwards a "ui" payload from ANY node (execution.py gates on len(output_ui), not on
+        # OUTPUT_NODE), so this needs no output-node status and does not change what executes.
+        ui = _preview_ui(out_img, out_colorspace, view_display, view_transform, f"ocio_cs_{unique_id}")
+        return {"ui": ui, "result": (out_img, out_vid)} if ui else (out_img, out_vid)
 
 
 class OCIODisplay:
