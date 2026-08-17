@@ -1146,7 +1146,17 @@ const READ_VIS = {
 // value-widget list - not inferred from widget.type, which is not a stable marker for "is this a button"
 // across litegraph/Vue-nodes versions.
 function applyReadVis(node, kind) {
-    const names = new Set(READ_VIS[kind] || READ_VIS.still);
+    if (kind !== undefined) node._ocioKind = kind;      // remembered so a raw_data toggle can re-apply
+    const names = new Set(READ_VIS[node._ocioKind] || READ_VIS.still);
+    // Raw Data means the node passes the file's values through untouched: read() skips _convert entirely,
+    // so input_colorspace / output_colorspace are DEAD while it is on. Leaving them editable invites exactly
+    // the bug they cause - a Read that reads 'sRGB - Display -> ACEScg' but emits neither, because nothing
+    // converted. Hidden rather than greyed: this pack's visibility mechanism is hide-with-zero-height
+    // (setVisibleWidgets), and litegraph has no disabled state that both canvas and Vue-nodes honour.
+    if (W(node, "raw_data")?.value) {
+        names.delete("input_colorspace");
+        names.delete("output_colorspace");
+    }
     setVisibleWidgets(node, (w) => w._ocioAlwaysVisible || names.has(w.name));
 }
 
@@ -2526,6 +2536,10 @@ app.registerExtension({
                 for (const w of ["input_colorspace", "output_colorspace", "raw_data"]) {
                     onChange(this, w, () => updateReadPreview(this));  // colorspace change -> re-render the thumb
                 }
+                // Raw Data toggles whether the colorspace pair does anything at all, so it also re-runs the
+                // visibility rule (applyReadVis drops the two dead widgets while it is on). Kept separate from
+                // the preview hook above because it must fire for raw_data ONLY.
+                onChange(this, "raw_data", () => applyReadVis(this));
                 for (const w of ["frame_shift", "fps", "start_frame", "end_frame"]) {
                     onChange(this, w, () => resyncAllWrites());   // Read range/shift/fps -> downstream Writes
                 }
