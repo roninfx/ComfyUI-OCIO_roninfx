@@ -1141,8 +1141,11 @@ const READ_VIS = {
     // edge_mode is listed for video since it now fills frames requested past the clip's last one (hold /
     // loop / bounce / black), the same four behaviours a sequence has. missing_frames stays out: a video
     // has no numbered gaps to fill, and frame_mode stays out because a video is always its whole clip.
+    // frame_shift is listed for video too: it re-bases the numbering handed DOWNSTREAM (resyncAllWrites
+    // pushes it to every wired OCIO Write, and that hook is kind-agnostic), so a clip can be delivered as
+    // 1001.. exactly like a sequence. It was hidden only because it started life as a sequence control.
     video: ["source", "input_colorspace", "output_colorspace", "raw_data", "start_frame", "end_frame",
-            "edge_mode", "fps"],
+            "frame_shift", "edge_mode", "fps"],
 };
 // show only the widgets that apply to the source kind (see setVisibleWidgets for the hide mechanism and why
 // it keeps every widget in node.widgets). A widget is "always visible" if it is marked _ocioAlwaysVisible
