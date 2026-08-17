@@ -1138,7 +1138,11 @@ const READ_VIS = {
     still: ["source", "input_colorspace", "output_colorspace", "raw_data"],
     sequence: ["source", "frame_mode", "input_colorspace", "output_colorspace", "raw_data",
                "start_frame", "end_frame", "frame_shift", "missing_frames", "edge_mode", "fps"],
-    video: ["source", "input_colorspace", "output_colorspace", "raw_data", "start_frame", "end_frame", "fps"],
+    // edge_mode is listed for video since it now fills frames requested past the clip's last one (hold /
+    // loop / bounce / black), the same four behaviours a sequence has. missing_frames stays out: a video
+    // has no numbered gaps to fill, and frame_mode stays out because a video is always its whole clip.
+    video: ["source", "input_colorspace", "output_colorspace", "raw_data", "start_frame", "end_frame",
+            "edge_mode", "fps"],
 };
 // show only the widgets that apply to the source kind (see setVisibleWidgets for the hide mechanism and why
 // it keeps every widget in node.widgets). A widget is "always visible" if it is marked _ocioAlwaysVisible

@@ -768,6 +768,30 @@ def load_source(source, start_frame=0, end_frame=0, frame_mode="auto", missing_m
         # start_frame 0 (unbounded/default) also maps to index 0. count spans [start_frame, end_frame] inclusive.
         count = (end_frame - start_frame + 1) if (end_frame >= start_frame and end_frame > 0) else 0
         arr, info = _read_video(s, max(0, start_frame - 1), count)
+        # edge_mode for VIDEO. It used to apply to sequences only (_assemble_sequence), so asking a video for
+        # frames past its last one simply returned a SHORT batch - the range you typed was silently not what
+        # you got. Now the same four behaviours a sequence has fill the tail. Skipped when the decode was
+        # capped for the memory budget, because then the shortfall is the cap talking, not the clip ending,
+        # and looping a truncated read would invent motion that is not in the file.
+        if count > 0 and arr.shape[0] < count and not info.get("capped"):
+            have = int(arr.shape[0])
+            if have == 0:
+                raise RuntimeError(f"OCIO Read: decoded no frames from {os.path.basename(s)}")
+            need = count - have
+            if edge_mode == "black":
+                pad = np.zeros((need, *arr.shape[1:]), arr.dtype)
+            elif edge_mode == "loop":
+                idx = [i % have for i in range(have, have + need)]
+                pad = arr[idx]
+            elif edge_mode == "bounce":
+                period = max(1, 2 * have - 2)
+                idx = [(p if p < have else period - p) for p in
+                       ((i % period) for i in range(have, have + need))]
+                pad = arr[idx]
+            else:                                            # hold (default): repeat the last decoded frame
+                pad = np.repeat(arr[-1:], need, axis=0)
+            arr = np.concatenate([arr, pad], axis=0)
+            info["edge_filled"] = need                       # surfaced in the node's info string
         alpha = np.ones((*arr.shape[:3], 1), np.float32)     # video has no alpha -> opaque
         arr = np.concatenate([arr, alpha], axis=-1)
         info["kind"] = "video"
