@@ -3022,6 +3022,13 @@ function _wfBaseName() {
 function syncWriteFilenameFromWorkflow(node) {
     const w = W(node, "filename");
     if (!w) return;
+    // HANDOVER: `filename` is also an input SLOT. Wired, something else owns the name entirely - a naming
+    // node, a shot-code string, a pipeline tool - and the widget value is ignored by the backend anyway.
+    // Writing to it behind a live link would leave the node displaying a name it is not using, which is
+    // worse than not filling it at all. Combined with auto_version=false (the default), that hands naming
+    // AND versioning over completely.
+    const slot = (node.inputs || []).find((i) => i && i.name === "filename");
+    if (slot && slot.link != null) return;
     const base = _wfBaseName();
     if (!base) return;
     const cur = String(w.value || "").trim();
