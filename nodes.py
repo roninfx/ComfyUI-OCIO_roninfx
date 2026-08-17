@@ -779,7 +779,7 @@ def _preview_view_transform():
                             "Viewer LUT view for this node's PREVIEW ONLY. Set both this and view_display to see it.")
 
 
-def _preview_ui(img, src_cs, display, view, filename):
+def _preview_ui(img, src_cs, display, view, filename, frame=0):
     """{'images': [...]} for an on-node preview of `img`'s first frame, or None when there is nothing to show.
 
     io_nodes imports FROM this module, so its helpers are imported lazily here rather than at module scope -
@@ -791,7 +791,8 @@ def _preview_ui(img, src_cs, display, view, filename):
     v = None if (not view or view == PREVIEW_VIEW_NONE) else view
     try:
         from .io_nodes import _save_preview_png
-        return {"images": _save_preview_png(img[0], f"{filename}.png", src_cs, d, v)}
+        idx = max(0, min(int(frame or 0), int(img.shape[0]) - 1))   # clamp, never raise on a stale number
+        return {"images": _save_preview_png(img[idx], f"{filename}.png", src_cs, d, v)}
     except Exception:
         return None
 
@@ -810,7 +811,15 @@ class OCIOColorSpace:
                         # Appended LAST for the positional reason: widgets_values is ordered, so a new widget
                         # anywhere earlier shifts every value after it in already-saved workflows.
                         "view_display": _preview_view_display(),
-                        "view_transform": _preview_view_transform()},
+                        "view_transform": _preview_view_transform(),
+                        # WHICH frame the preview shows. Free: still ONE frame rendered, just not
+                        # always the first. The alternative - a scrubbing transport - has to cache
+                        # EVERY frame to disk as half-float (measured on this material: ~7 MB/frame,
+                        # ~0.7 s/frame), which is paid on every render whether the viewer is opened
+                        # or not. This answers the same question, "what does frame N look like",
+                        # for nothing. 0 = first frame. Out-of-range clamps rather than errors.
+                        "preview_frame": ("INT", {"default": 0, "min": 0, "max": 100000000,
+                                          "tooltip": "Which frame the on-node preview shows, as a 0-based index into the batch (0 = first). Clamped to the last frame if higher. Preview only - it changes nothing about the data, and costs nothing, because one frame is rendered either way."})},
                 "hidden": {"unique_id": "UNIQUE_ID"}}
 
     RETURN_TYPES = ("IMAGE", "VIDEO")
@@ -821,7 +830,7 @@ class OCIOColorSpace:
     CATEGORY = "OCIO"
 
     def convert(self, image=None, in_colorspace=None, out_colorspace=None, mix=1.0, config_path=BUILTIN,
-                video=None, view_display=None, view_transform=None, unique_id="0"):
+                video=None, view_display=None, view_transform=None, preview_frame=0, unique_id="0"):
         _require_ocio()
         cfg, cfg_key = _config_from_choice_keyed(config_path)
         if cfg is None:
@@ -834,7 +843,7 @@ class OCIOColorSpace:
         # loaded, so a wrong in_colorspace stays invisible until something far downstream looks wrong.
         # ComfyUI forwards a "ui" payload from ANY node (execution.py gates on len(output_ui), not on
         # OUTPUT_NODE), so this needs no output-node status and does not change what executes.
-        ui = _preview_ui(out_img, out_colorspace, view_display, view_transform, f"ocio_cs_{unique_id}")
+        ui = _preview_ui(out_img, out_colorspace, view_display, view_transform, f"ocio_cs_{unique_id}", preview_frame)
         return {"ui": ui, "result": (out_img, out_vid)} if ui else (out_img, out_vid)
 
 
