@@ -1217,10 +1217,15 @@ function syncWriteFromUpstream(node) {
     if (rFps) setWSilent(node, "fps", rFps);
     node.setDirtyCanvas(true, true);
 }
-// A processing node's PREVIEW mirrors the viewer LUT of the OCIO Read it is fed from, so one setting on the Read
-// governs how the whole chain is viewed - the same idea as fps and the frame range already riding downstream.
-// ONLY while the node is still at its default (none - raw): once a value is set here by hand it is left alone,
-// so a per-node override is never silently reverted. Nothing about the DATA changes; these are preview-only.
+// A viewer LUT answers "what will this look like finished", and that question only makes sense where the data
+// is a picture: the FILE a Read loaded, or the FILE a Write is about to make. It is inherited between those.
+//
+// It is deliberately NOT pushed onto TRANSFORM nodes (OCIOColorSpace and friends). Their preview answers a
+// different question - "what is actually in the pipe here" - and a view transform defeats it: told the source
+// is ACEScct, OCIO correctly undoes the log encoding for display, so a log image and a linear one look nearly
+// the same. That hides the exact thing the node is being inspected for. Left raw, ACEScct reads as washed out
+// and lifted, which is what it IS, and two transform nodes carrying the same encoding look alike - which is
+// the comparison worth having. A LUT set on one BY HAND is still honoured; this only governs the default.
 function syncPreviewViewFromUpstream(node) {
     const read = findUpstreamRead(node);
     if (!read) return;
@@ -1233,8 +1238,7 @@ function syncPreviewViewFromUpstream(node) {
 }
 function resyncAllWrites() {
     for (const nd of (app.graph && app.graph._nodes) || []) {
-        if (OCIO_PROC_TYPES.has(nd.type)) syncPreviewViewFromUpstream(nd);
-        if (nd.type === "OCIOWrite") syncWriteFromUpstream(nd);
+        if (nd.type === "OCIOWrite") { syncPreviewViewFromUpstream(nd); syncWriteFromUpstream(nd); }
         // The Player follows the upstream Read for the same reason a Write does - its timeline shows SOURCE
         // frame numbers, and `base` is what maps them back to batch indices. Without this it only re-synced
         // when the Player itself re-rendered, so editing the Read's range (or rewiring what feeds the Player)
