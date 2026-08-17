@@ -3378,6 +3378,32 @@ def _versioned(name, version):
     return f"{name}_v{int(version):03d}"
 
 
+# EVERY OCIO Write in one execution must land on the SAME version - an EXR master and its MP4 review that
+# disagree are not a delivery, they are two half-deliveries. Resolving per node cannot achieve that: the first
+# Write creates v003 on disk, and the second then scans, sees it, and picks v004. Worse, two Writes pointed at
+# different folders would scan different directories and never agree at all.
+#
+# So the version is resolved ONCE per execution and shared. The key is id(prompt): ComfyUI hands every node in
+# a run the SAME prompt object, so its identity is a free per-execution token - no prompt_id hidden input
+# exists to use instead. Keyed by name too, so two unrelated Writes with different names still version apart.
+# Bounded because a long session would otherwise accumulate one entry per run forever.
+_VERSION_CACHE = {}
+_VERSION_CACHE_MAX = 64
+
+
+def _shared_version(prompt, folder, name):
+    """The version for `name` in THIS execution: computed once, then reused by every other Write in the run."""
+    key = (id(prompt) if prompt is not None else 0, name)
+    hit = _VERSION_CACHE.get(key)
+    if hit is not None:
+        return hit
+    v = _next_version(folder, name)
+    if len(_VERSION_CACHE) >= _VERSION_CACHE_MAX:
+        _VERSION_CACHE.clear()
+    _VERSION_CACHE[key] = v
+    return v
+
+
 def _write_output_paths(folder, filename, container, still_format, video_codec, output_colorspace,
                         raw_data, colorspace_in_name, start_number, count, still_frame=None,
                         auto_version=False):
@@ -3608,9 +3634,9 @@ class OCIOWrite:
             "view_display": _view_display_input(),
             "view_transform": _view_transform_input(),
             # Appended LAST, same positional rule as the two above.
-            "auto_version": ("BOOLEAN", {"default": False,
-                             "tooltip": "Name the output <filename>_vNNN, picking the next free version on disk: v001 when none exists, otherwise one past the highest. A SEQUENCE also gets its own subfolder of the same name, so each version is self-contained instead of hundreds of loose frames sharing one directory. Off = the plain filename, overwriting in place."}),
-        }}
+            "auto_version": ("BOOLEAN", {"default": True,
+                             "tooltip": "Name the output <filename>_vNNN, picking the next free version on disk: v001 when none exists, otherwise one past the highest. Every OCIO Write in the SAME run shares one version, so an EXR master and its MP4 review always match. A SEQUENCE also gets its own subfolder of the same name. Off = the plain filename, overwriting in place."}),
+        }, "hidden": {"prompt": "PROMPT"}}
 
     RETURN_TYPES = ("STRING",)
     RETURN_NAMES = ("path",)
@@ -3626,7 +3652,7 @@ class OCIOWrite:
               output_folder, filename, colorspace_in_name=True, auto_colorspace=True, compression="zip",
               alpha=None, fps=24.0, render_nonce="", images=None, video=None, audio=None,
               metadata="", write_audio=True,
-              view_display=VIEW_NONE, view_transform=VIEW_NONE, auto_version=False):   # render_nonce: cache-buster (see INPUT_TYPES). images/video: mutually-exclusive inputs. view_*: preview-only LUT.
+              view_display=VIEW_NONE, view_transform=VIEW_NONE, auto_version=True, prompt=None):   # render_nonce: cache-buster (see INPUT_TYPES). images/video: mutually-exclusive inputs. view_*: preview-only LUT.
         if video is not None:                                        # a native ComfyUI VIDEO -> render it out with ALL these Write settings (container, codec, colorspace, bit depth)
             images, _vfps, _vaudio = _video_unwrap(video)
             if _vfps and _vfps > 0:
@@ -3715,8 +3741,8 @@ class OCIOWrite:
         _eff_name = filename
         _eff_folder = folder
         if auto_version:
-            _eff_name = _versioned((str(filename) or "").strip() or "ocio_out",
-                                   _next_version(folder, (str(filename) or "").strip() or "ocio_out"))
+            _base = (str(filename) or "").strip() or "ocio_out"
+            _eff_name = _versioned(_base, _shared_version(prompt, folder, _base))
             if container == "sequence":
                 _eff_folder = os.path.join(folder, _eff_name)
                 os.makedirs(_eff_folder, exist_ok=True)
