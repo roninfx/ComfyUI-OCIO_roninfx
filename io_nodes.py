@@ -3250,6 +3250,13 @@ class OCIORead:
                           "tooltip": "Frames OUTSIDE the original range (Nuke before/after): hold the end frame, loop the sequence, bounce (ping-pong), or black."}),
             "fps": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 240.0, "step": 0.001,
                     "tooltip": "0 = take from the video metadata (24 for stills). Flows to OCIO Write through the wire."}),
+            # SIGNED, and distinct from frame_shift on purpose. frame_shift is an ABSOLUTE re-base ("the first
+            # frame is now called N"), so it cannot express "move this 10 earlier" - there is no frame -10 to
+            # re-base onto. This is the RELATIVE one: +10 later, -10 earlier, applied on top of whatever base
+            # frame_shift resolved to. Appended LAST in required (nothing follows it, and OCIORead has no
+            # optional block) so widgets_values in already-saved workflows keeps every existing index.
+            "frame_offset": ("INT", {"default": 0, "min": -100000000, "max": 100000000,
+                             "tooltip": "Slip the DOWNSTREAM numbering by this many frames: +10 delivers 10 later, -10 delivers 10 earlier. The pixels are unchanged - this renumbers, it does not retime or re-read. Combine with frame_shift (absolute re-base) or leave that at 0 to offset from the source's own numbering."}),
         }}
 
     # 'source metadata' is index 5 and MUST stay last: an output connection is stored by SLOT INDEX, so inserting
@@ -3261,7 +3268,7 @@ class OCIORead:
     CATEGORY = "OCIO"
 
     def read(self, source, frame_mode, input_colorspace, output_colorspace, raw_data, start_frame, end_frame,
-             frame_shift, missing_frames, edge_mode, fps):
+             frame_shift, missing_frames, edge_mode, fps, frame_offset=0):
         arr, info = load_source(source, start_frame, end_frame, frame_mode, missing_frames, edge_mode)
         image4 = torch.from_numpy(np.ascontiguousarray(arr.astype(np.float32)))   # [N,H,W,4]
         meta_fps = float(info.get("fps", 0.0) or 0.0)
@@ -3272,7 +3279,8 @@ class OCIORead:
             rgb = _convert(rgb, input_colorspace, output_colorspace)
         # frame_shift re-bases the downstream numbering (the batch is unchanged; OCIO Write reads it via the wire)
         n = rgb.shape[0]
-        base = frame_shift if frame_shift else info.get("orig_start", 0)
+        # frame_shift picks the base (absolute); frame_offset slips it (relative, signed).
+        base = (frame_shift if frame_shift else info.get("orig_start", 0)) + int(frame_offset or 0)
         shift_txt = f", frames [{base}-{base + n - 1}]" if info.get("kind") == "sequence" else ""
         kind, res = info.get("kind"), f"{arr.shape[2]}x{arr.shape[1]}"
         label = info.get("label", "")

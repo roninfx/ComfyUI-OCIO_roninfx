@@ -1137,7 +1137,7 @@ async function fillRange(node, source, opts) {
 const READ_VIS = {
     still: ["source", "input_colorspace", "output_colorspace", "raw_data"],
     sequence: ["source", "frame_mode", "input_colorspace", "output_colorspace", "raw_data",
-               "start_frame", "end_frame", "frame_shift", "missing_frames", "edge_mode", "fps"],
+               "start_frame", "end_frame", "frame_shift", "frame_offset", "missing_frames", "edge_mode", "fps"],
     // edge_mode is listed for video since it now fills frames requested past the clip's last one (hold /
     // loop / bounce / black), the same four behaviours a sequence has. missing_frames stays out: a video
     // has no numbered gaps to fill, and frame_mode stays out because a video is always its whole clip.
@@ -1145,7 +1145,7 @@ const READ_VIS = {
     // pushes it to every wired OCIO Write, and that hook is kind-agnostic), so a clip can be delivered as
     // 1001.. exactly like a sequence. It was hidden only because it started life as a sequence control.
     video: ["source", "input_colorspace", "output_colorspace", "raw_data", "start_frame", "end_frame",
-            "frame_shift", "edge_mode", "fps"],
+            "frame_shift", "frame_offset", "edge_mode", "fps"],
 };
 // show only the widgets that apply to the source kind (see setVisibleWidgets for the hide mechanism and why
 // it keeps every widget in node.widgets). A widget is "always visible" if it is marked _ocioAlwaysVisible
@@ -2555,7 +2555,7 @@ app.registerExtension({
                 // visibility rule (applyReadVis drops the two dead widgets while it is on). Kept separate from
                 // the preview hook above because it must fire for raw_data ONLY.
                 onChange(this, "raw_data", () => applyReadVis(this));
-                for (const w of ["frame_shift", "fps", "start_frame", "end_frame"]) {
+                for (const w of ["frame_shift", "frame_offset", "fps", "start_frame", "end_frame"]) {
                     onChange(this, w, () => resyncAllWrites());   // Read range/shift/fps -> downstream Writes
                 }
                 // Remember which auto-filled fields the artist edited, so a detect still in flight overwrites
