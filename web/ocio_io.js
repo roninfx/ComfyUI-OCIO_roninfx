@@ -1155,14 +1155,22 @@ const READ_VIS = {
 function applyReadVis(node, kind) {
     if (kind !== undefined) node._ocioKind = kind;      // remembered so a raw_data toggle can re-apply
     const names = new Set(READ_VIS[node._ocioKind] || READ_VIS.still);
-    // Raw Data means the node passes the file's values through untouched: read() skips _convert entirely,
-    // so input_colorspace / output_colorspace are DEAD while it is on. Leaving them editable invites exactly
-    // the bug they cause - a Read that reads 'sRGB - Display -> ACEScg' but emits neither, because nothing
-    // converted. Hidden rather than greyed: this pack's visibility mechanism is hide-with-zero-height
-    // (setVisibleWidgets), and litegraph has no disabled state that both canvas and Vue-nodes honour.
-    if (W(node, "raw_data")?.value) {
-        names.delete("input_colorspace");
-        names.delete("output_colorspace");
+    // Raw Data means the node passes the file's values through untouched: read() skips _convert entirely, so
+    // input_colorspace / output_colorspace do NOTHING while it is on. They stay VISIBLE but are greyed out,
+    // rather than hidden: the pair still says what the file is and what it would become, which is what makes
+    // the raw choice legible. Hiding them removed that, and hid the reason the Read is emitting what it is.
+    // Dual-set for the same reason `hidden` is: the canvas reads widget.disabled, Vue-nodes read
+    // options.disabled. Set BEFORE setVisibleWidgets so its pokeWidgets() re-render picks the change up.
+    const rawOn = !!W(node, "raw_data")?.value;
+    for (const nm of ["input_colorspace", "output_colorspace"]) {
+        const w = W(node, nm);
+        if (!w) continue;
+        if (!w.options) w.options = {};
+        w.disabled = rawOn;
+        w.options.disabled = rawOn;
+        w.tooltip = rawOn
+            ? "Ignored while Raw Data is on - the file's values pass through unconverted. Turn Raw Data off to apply this."
+            : undefined;
     }
     setVisibleWidgets(node, (w) => w._ocioAlwaysVisible || names.has(w.name));
 }
