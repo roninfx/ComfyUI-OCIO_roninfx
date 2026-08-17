@@ -1161,6 +1161,12 @@ function applyReadVis(node, kind) {
     // the raw choice legible. Hiding them removed that, and hid the reason the Read is emitting what it is.
     // Dual-set for the same reason `hidden` is: the canvas reads widget.disabled, Vue-nodes read
     // options.disabled. Set BEFORE setVisibleWidgets so its pokeWidgets() re-render picks the change up.
+    // ONE numbering control. frame_shift is the legacy ABSOLUTE re-base ("the first frame is now called N"),
+    // which cannot go negative - there is no frame -10 to re-base onto - and frame_offset (signed, default 0)
+    // supersedes it: base = (frame_shift or source start) + frame_offset, so with frame_shift 0 the offset
+    // alone moves the numbering either way from wherever the source starts. Hidden while it is 0, i.e. while
+    // it is inert. Kept VISIBLE when an older graph has it set, so a non-default value can never act unseen.
+    if (!W(node, "frame_shift")?.value) names.delete("frame_shift");
     const rawOn = !!W(node, "raw_data")?.value;
     for (const nm of ["input_colorspace", "output_colorspace"]) {
         const w = W(node, nm);

@@ -3243,7 +3243,7 @@ class OCIORead:
             "end_frame": ("INT", {"default": 0, "min": 0, "max": 100000000,
                           "tooltip": "Last frame number to load (0 = to the detected end). Above the original range, edge_mode fills in."}),
             "frame_shift": ("INT", {"default": 0, "min": 0, "max": 100000000,
-                            "tooltip": "Re-base: the number the FIRST frame becomes downstream (Nuke frame offset). 0 = keep the source number (e.g. 86). Set 1 to start at 1, 10 to start at 10 - the whole range shifts with it. Flows to OCIO Write (first_frame + start_number)."}),
+                            "tooltip": "LEGACY, superseded by frame_offset - leave at 0. Absolute re-base: the number the FIRST frame becomes (0 = keep the source number). Cannot go negative, which is why frame_offset exists. Hidden in the UI while it is 0; it reappears if an older graph has it set, so a non-default value is never invisible."}),
             "missing_frames": (["black", "hold", "error"], {"default": "black",
                                "tooltip": "Gaps INSIDE the sequence (e.g. 24 missing between 23 and 25): black = a black frame; hold = repeat the previous frame; error = stop. Missing frames are listed in 'info'."}),
             "edge_mode": (["hold", "loop", "bounce", "black"], {"default": "hold",
@@ -3256,7 +3256,7 @@ class OCIORead:
             # frame_shift resolved to. Appended LAST in required (nothing follows it, and OCIORead has no
             # optional block) so widgets_values in already-saved workflows keeps every existing index.
             "frame_offset": ("INT", {"default": 0, "min": -100000000, "max": 100000000,
-                             "tooltip": "Slip the DOWNSTREAM numbering by this many frames: +10 delivers 10 later, -10 delivers 10 earlier. The pixels are unchanged - this renumbers, it does not retime or re-read. Combine with frame_shift (absolute re-base) or leave that at 0 to offset from the source's own numbering."}),
+                             "tooltip": "Slip the numbering handed DOWNSTREAM: +10 delivers 10 later, -10 delivers 10 earlier, from wherever the source starts. 0 = leave it alone. The pixels are unchanged - this renumbers, it does not retime or re-read (start_frame is what changes which frames are read)."}),
         }}
 
     # 'source metadata' is index 5 and MUST stay last: an output connection is stored by SLOT INDEX, so inserting
