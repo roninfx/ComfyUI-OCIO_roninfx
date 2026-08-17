@@ -175,7 +175,13 @@ def _dual_io(apply_fn, image, video, label=None, expect_low_clip=False):
         out = apply_fn(frames)
         if label:
             _report_range_loss(frames, out, label, expect_low_clip)
-        return (None, _video_wrap(out, fr, audio))
+        # The IMAGE output carries the frames too, instead of None. `out` is the processed batch either way,
+        # so this costs nothing and duplicates nothing - it is the SAME tensor the VIDEO output wraps.
+        # Returning None meant anything wired to IMAGE while the node was driven by VIDEO died with
+        # "'NoneType' object is not subscriptable" - PreviewImage does images[0] with no guard, and the error
+        # names neither this node nor the reason. Wiring a preview to a video-driven colour node is an obvious
+        # thing to want, and it now simply works.
+        return (out, _video_wrap(out, fr, audio))
     if image is not None:
         out = apply_fn(image)
         if label:
