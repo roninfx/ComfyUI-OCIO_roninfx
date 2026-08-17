@@ -3002,3 +3002,45 @@ app.registerExtension({
         };
     },
 });
+
+// ---------------------------------------------------------------------------------------------------------
+// OCIO Write: name the output after the WORKFLOW, so a delivery is traceable to the graph that made it
+// without anyone typing (and mistyping) the shot name into every Write node.
+//
+// The name is only filled while `filename` is still untouched - its default, or a name this filled earlier.
+// A name typed by hand is never overwritten: the whole point is to save typing, not to override a decision.
+// Extension is stripped and anything illegal in a path is replaced, since this becomes a real file/folder.
+// The VERSION is deliberately NOT computed here: only the server can see what is already on disk, and a
+// front-end guess would disagree with the write the moment two graphs share an output folder.
+function _wfBaseName() {
+    try {
+        const f = app.extensionManager?.workflow?.activeWorkflow?.filename;
+        if (!f) return "";
+        return String(f).replace(/\.[^.]+$/, "").replace(/[<>:"/\|?*]+/g, "_").trim();
+    } catch (e) { return ""; }
+}
+function syncWriteFilenameFromWorkflow(node) {
+    const w = W(node, "filename");
+    if (!w) return;
+    const base = _wfBaseName();
+    if (!base) return;
+    const cur = String(w.value || "").trim();
+    if (cur && cur !== "ocio_out" && cur !== node._ocioAutoFilename) return;   // hand-typed: leave it
+    if (cur === base) { node._ocioAutoFilename = base; return; }
+    setWSilent(node, "filename", base);
+    node._ocioAutoFilename = base;                                            // remember, so a later rename can move it
+}
+app.registerExtension({
+    name: "ocio.write.filename.from.workflow",
+    async nodeCreated(node) {
+        if (node?.comfyClass !== "OCIOWrite" && node?.type !== "OCIOWrite") return;
+        setTimeout(() => syncWriteFilenameFromWorkflow(node), 0);   // after widgets exist and a saved value loads
+    },
+    async afterConfigureGraph() {
+        // Runs after a workflow LOADS, which is when activeWorkflow.filename is finally correct - at
+        // nodeCreated time during a load it can still be the previous workflow, or nothing at all.
+        for (const nd of (app.graph && app.graph._nodes) || []) {
+            if (nd.type === "OCIOWrite") { try { syncWriteFilenameFromWorkflow(nd); } catch (e) {} }
+        }
+    },
+});

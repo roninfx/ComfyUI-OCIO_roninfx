@@ -3345,14 +3345,53 @@ def _cs_tag(name):
     return re.sub(r"_+", "_", re.sub(r"[^a-z0-9]+", "_", low)).strip("_")
 
 
+_VERSION_RE = re.compile(r"_v(\d{3,})(?:[._]|$)", re.I)
+
+
+def _next_version(folder, name):
+    """Next free _vNNN for `name` in `folder`, as an int. 1 when nothing matching exists.
+
+    Scans FILES and DIRECTORIES alike, because a sequence writes into a versioned SUBDIRECTORY while a video
+    or still writes a versioned FILE beside it - miss either and the same version gets handed out twice and
+    the earlier render is overwritten. Matching is on `<name>_vNNN` followed by a separator or end-of-string,
+    so `shot_v001.mp4`, `shot_v001_acescg.0001.exr` and the directory `shot_v001` all count as version 1,
+    while a DIFFERENT stem that merely starts the same (`shot_bg_v007`) does not bump `shot`.
+    """
+    if not name or not folder or not os.path.isdir(folder):
+        return 1
+    hi = 0
+    pre = name.lower() + "_v"
+    try:
+        for entry in os.listdir(folder):
+            low = entry.lower()
+            if not low.startswith(pre):
+                continue
+            m = _VERSION_RE.search(low[len(name):])
+            if m:
+                hi = max(hi, int(m.group(1)))
+    except OSError:
+        return 1
+    return hi + 1
+
+
+def _versioned(name, version):
+    return f"{name}_v{int(version):03d}"
+
+
 def _write_output_paths(folder, filename, container, still_format, video_codec, output_colorspace,
-                        raw_data, colorspace_in_name, start_number, count, still_frame=None):
+                        raw_data, colorspace_in_name, start_number, count, still_frame=None,
+                        auto_version=False):
     """The exact output file path(s) OCIOWrite.write() creates for these params - SINGLE SOURCE OF TRUTH for both
     write() and the /ocio/write_paths overwrite check (so the "file exists?" prompt checks the real names). count =
     number of frames to write (1 for a still / video). still_frame (still image only): when not None, the source
     frame number to stamp in the name (name_cs.0039.png) - a still grabbed from a sequence / video; None = plain
     name (a single image). Added 2026-07-04."""
     name = (str(filename) if filename is not None else "").strip() or "ocio_out"
+    # auto_version: <name>_vNNN, resolved against what is ALREADY on disk - v001 when nothing matches, else
+    # one past the highest. Resolved HERE rather than in write() so the /ocio/write_paths overwrite check and
+    # the actual write agree on the name; two different answers would make the "file exists?" prompt lie.
+    if auto_version:
+        name = _versioned(name, _next_version(folder, name))
     tag = ("raw" if raw_data else _cs_tag(output_colorspace)) if colorspace_in_name else ""
     stem = f"{name}_{tag}" if tag else name
     if container == "video":
@@ -3364,6 +3403,11 @@ def _write_output_paths(folder, filename, container, still_format, video_codec, 
         return [os.path.join(folder, f"{stem}.{ext}")]
     ext = _STILL_EXT[still_format]                                          # sequence: 4-digit numbered frames
     sn = int(start_number)
+    # A SEQUENCE goes in its own versioned SUBDIRECTORY, named exactly like the frames it holds. Hundreds of
+    # loose frames from several versions in one folder is the thing this avoids; it is also what makes the
+    # directory scan in _next_version see a finished sequence as a version at all.
+    if auto_version:
+        folder = os.path.join(folder, name)
     return [os.path.join(folder, f"{stem}.{sn + i:04d}.{ext}") for i in range(max(1, int(count)))]
 
 
@@ -3563,6 +3607,9 @@ class OCIOWrite:
             # value after it shifts in workflows saved before it existed.
             "view_display": _view_display_input(),
             "view_transform": _view_transform_input(),
+            # Appended LAST, same positional rule as the two above.
+            "auto_version": ("BOOLEAN", {"default": False,
+                             "tooltip": "Name the output <filename>_vNNN, picking the next free version on disk: v001 when none exists, otherwise one past the highest. A SEQUENCE also gets its own subfolder of the same name, so each version is self-contained instead of hundreds of loose frames sharing one directory. Off = the plain filename, overwriting in place."}),
         }}
 
     RETURN_TYPES = ("STRING",)
@@ -3579,7 +3626,7 @@ class OCIOWrite:
               output_folder, filename, colorspace_in_name=True, auto_colorspace=True, compression="zip",
               alpha=None, fps=24.0, render_nonce="", images=None, video=None, audio=None,
               metadata="", write_audio=True,
-              view_display=VIEW_NONE, view_transform=VIEW_NONE):   # render_nonce: cache-buster (see INPUT_TYPES). images/video: mutually-exclusive inputs. view_*: preview-only LUT.
+              view_display=VIEW_NONE, view_transform=VIEW_NONE, auto_version=False):   # render_nonce: cache-buster (see INPUT_TYPES). images/video: mutually-exclusive inputs. view_*: preview-only LUT.
         if video is not None:                                        # a native ComfyUI VIDEO -> render it out with ALL these Write settings (container, codec, colorspace, bit depth)
             images, _vfps, _vaudio = _video_unwrap(video)
             if _vfps and _vfps > 0:
@@ -3662,9 +3709,22 @@ class OCIOWrite:
         cs = None if raw_data else output_colorspace                       # colorspace stamped in metadata
         base = source_start if source_start else 1                         # logical number of the first batch frame
         # output paths via the shared _write_output_paths (same names the /ocio/write_paths overwrite check uses)
+        # Resolve the version ONCE, here, and pass the already-versioned name down. Calling _wp twice while
+        # auto_version re-scanned the folder would hand out v001 for the first frame and v002 for the next
+        # as soon as frame one hit the disk - the sequence would scatter itself across versions.
+        _eff_name = filename
+        _eff_folder = folder
+        if auto_version:
+            _eff_name = _versioned((str(filename) or "").strip() or "ocio_out",
+                                   _next_version(folder, (str(filename) or "").strip() or "ocio_out"))
+            if container == "sequence":
+                _eff_folder = os.path.join(folder, _eff_name)
+                os.makedirs(_eff_folder, exist_ok=True)
+
         def _wp(cnt, still_frame=None):
-            return _write_output_paths(folder, filename, container, still_format, video_codec, output_colorspace,
-                                       raw_data, colorspace_in_name, start_number, cnt, still_frame=still_frame)
+            return _write_output_paths(_eff_folder, _eff_name, container, still_format, video_codec,
+                                       output_colorspace, raw_data, colorspace_in_name, start_number, cnt,
+                                       still_frame=still_frame)
 
         def alpha_of(src_a, i, ref):
             if src_a is None:
