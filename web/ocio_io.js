@@ -1214,6 +1214,12 @@ function syncWriteFromUpstream(node) {
 function resyncAllWrites() {
     for (const nd of (app.graph && app.graph._nodes) || []) {
         if (nd.type === "OCIOWrite") syncWriteFromUpstream(nd);
+        // The Player follows the upstream Read for the same reason a Write does - its timeline shows SOURCE
+        // frame numbers, and `base` is what maps them back to batch indices. Without this it only re-synced
+        // when the Player itself re-rendered, so editing the Read's range (or rewiring what feeds the Player)
+        // left a stale base behind: the viewer then asked for frames the batch does not contain and showed
+        // one frame, or none, with nothing on screen saying why.
+        else if (nd.type === "OCIOPlayer") { try { syncPlayerFromUpstream(nd); } catch (e) {} }
     }
 }
 // OCIO Player mirrors the SAME source frame numbering + fps as the upstream OCIO Read, traced back through any chain
