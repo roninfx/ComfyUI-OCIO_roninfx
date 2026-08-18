@@ -791,7 +791,11 @@ def _preview_ui(img, src_cs, display, view, filename, frame=0):
     v = None if (not view or view == PREVIEW_VIEW_NONE) else view
     try:
         from .io_nodes import _save_preview_png
-        idx = max(0, min(int(frame or 0), int(img.shape[0]) - 1))   # clamp, never raise on a stale number
+        try:                                                       # blank / None / junk -> frame 0
+            want = int(str(frame).strip() or 0)
+        except (TypeError, ValueError):
+            want = 0
+        idx = max(0, min(want, int(img.shape[0]) - 1))              # clamp, never raise on a stale number
         return {"images": _save_preview_png(img[idx], f"{filename}.png", src_cs, d, v)}
     except Exception:
         return None
@@ -823,8 +827,14 @@ class OCIOColorSpace:
                         # is a FRONT-END state - it hides what was already made and saves nothing at all.
                         "preview": ("BOOLEAN", {"default": True,
                                     "tooltip": "Render this node's on-node preview. OFF skips it entirely - no image encoded, no file written. The ▾ Viewer button only HIDES a preview that was already made; this is what actually saves the work."}),
-                        "preview_frame": ("INT", {"default": 0, "min": 0, "max": 100000000,
-                                          "tooltip": "Which frame the on-node preview shows, as a 0-based index into the batch (0 = first). Clamped to the last frame if higher. Preview only - it changes nothing about the data, and costs nothing, because one frame is rendered either way."})},
+                        # STRING, not INT, for the reason OCIOPlayer's `base` is a STRING: a widget whose
+                        # value goes MISSING - an older graph saved before it existed, or a widgets_values
+                        # shift - arrives as None, and ComfyUI's INT coercion raises before the node runs.
+                        # "Failed to convert an input value to a INT value ... not 'NoneType'" refuses the
+                        # whole prompt for a PREVIEW setting, which should never be able to stop a render.
+                        # As a STRING an absent or blank value parses to 0 below and the render proceeds.
+                        "preview_frame": ("STRING", {"default": "0", "multiline": False,
+                                          "tooltip": "Which frame the on-node preview shows, as a 0-based index into the batch (0 = first). Clamped to the last frame if higher; blank or unreadable means 0. Preview only - it changes nothing about the data, and costs nothing, because one frame is rendered either way."})},
                 "hidden": {"unique_id": "UNIQUE_ID"}}
 
     RETURN_TYPES = ("IMAGE", "VIDEO")
@@ -835,7 +845,7 @@ class OCIOColorSpace:
     CATEGORY = "OCIO"
 
     def convert(self, image=None, in_colorspace=None, out_colorspace=None, mix=1.0, config_path=BUILTIN,
-                video=None, view_display=None, view_transform=None, preview=True, preview_frame=0, unique_id="0"):
+                video=None, view_display=None, view_transform=None, preview=True, preview_frame="0", unique_id="0"):
         _require_ocio()
         cfg, cfg_key = _config_from_choice_keyed(config_path)
         if cfg is None:
