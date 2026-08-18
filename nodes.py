@@ -858,8 +858,14 @@ class OCIOColorSpace:
         # loaded, so a wrong in_colorspace stays invisible until something far downstream looks wrong.
         # ComfyUI forwards a "ui" payload from ANY node (execution.py gates on len(output_ui), not on
         # OUTPUT_NODE), so this needs no output-node status and does not change what executes.
+        # MISSING IS NOT OFF. A graph saved before `preview` existed, or one whose widget values shifted, hands
+        # this None - and `if preview` reads None as "the artist turned it off", so the previews just stopped,
+        # silently, with every widget still looking correct on the node. An absent value means NOT SET, and an
+        # unset switch takes its declared default (True). Only an explicit False turns the preview off.
+        # Same failure as preview_frame's INT coercion, one widget along: see its note in INPUT_TYPES.
+        show = True if preview is None else bool(preview)
         ui = (_preview_ui(out_img, out_colorspace, view_display, view_transform, f"ocio_cs_{unique_id}",
-                          preview_frame) if preview else None)
+                          preview_frame) if show else None)
         return {"ui": ui, "result": (out_img, out_vid)} if ui else (out_img, out_vid)
 
 
