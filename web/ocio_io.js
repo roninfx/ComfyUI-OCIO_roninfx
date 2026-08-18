@@ -425,8 +425,7 @@ function _vpInitGL(p) {
 }
 async function _refreshVideoLut(node, p) {
     const g = p.gl; if (!g) return;
-    const q = new URLSearchParams({ in_cs: W(node, "input_colorspace")?.value || "", out_cs: W(node, "output_colorspace")?.value || "",
-        raw: W(node, "raw_data")?.value ? "1" : "0", size: "33" });
+    const q = new URLSearchParams({ ..._csParams(node), size: "33" });
     try {
         const r = await fetch("/ocio/lut?" + q.toString()); if (!r.ok) throw new Error("lut " + r.status);
         const n = parseInt(r.headers.get("X-Lut-Size") || "33", 10); const buf = new Uint8Array(await r.arrayBuffer());
@@ -508,15 +507,14 @@ function _startViewport(node, p, src) {
 // time from cold, so the [in,out] range is prefetched into a client blob cache (a Nuke/RV-style flipbook); playback
 // runs from that cache. Frame numbers <-> 0-based index via _seqBase (orig_start). Added 2026-07-03.
 function _seqCsSig(node) {
-    return (W(node, "input_colorspace")?.value || "") + "|" + (W(node, "output_colorspace")?.value || "") +
-           "|" + (W(node, "raw_data")?.value ? "1" : "0") + "|" + _viewSig(node);   // view LUT is part of the cache key
+    const c = _csParams(node);
+    return c.in_cs + "|" + c.out_cs + "|" + c.raw + "|" + _viewSig(node);   // view LUT is part of the cache key
 }
 function _seqUrl(p, idx) {
     const node = p.node, base = (p.seq.origStart | 0);
     return "/ocio/thumb?" + new URLSearchParams({
         src: p.seq.src, frame: String(base + (idx | 0)),
-        in_cs: W(node, "input_colorspace")?.value || "", out_cs: W(node, "output_colorspace")?.value || "",
-        raw: W(node, "raw_data")?.value ? "1" : "0",
+        ..._csParams(node),                              // Read: in -> out. Write: raw (the file is already converted)
         ..._viewParams(node),                            // viewer LUT: flipbook frames get it too
         full: p.original ? "1" : "0",                    // original = full-res thumb, proxy = 512px
     }).toString();
@@ -619,9 +617,28 @@ function _viewSig(node) {
     const p = _viewParams(node);
     return (p.vdisp || "") + "|" + (p.vview || "");
 }
+// The colour pair a preview is rendered THROUGH, which is not the same question for the two node kinds and was
+// the reason the flipbook could not simply be pointed at a Write.
+//
+//   OCIO Read previews a file still in its SOURCE encoding, so the node's own input_colorspace -> output_colorspace
+//   is exactly the transform to show, and raw_data means "show it untouched".
+//   OCIO WRITE previews the file it JUST WROTE. Those pixels are already in output_colorspace - converting again
+//   would apply the transform twice and show a picture that exists nowhere. So a Write preview is always raw, and
+//   only the viewer LUT rides on top. in_cs still carries the file's real colorspace because /ocio/thumb needs a
+//   source to build that LUT from (with raw=1 it reads in_cs).
+//
+// Any node without the Read's widget names lands on the Read branch and gets empty strings, which the server
+// treats as "no conversion" - the same as before this existed.
+function _csParams(node) {
+    if (node && node.type === "OCIOWrite") {
+        const cs = (W(node, "raw_data")?.value ? W(node, "from_colorspace") : W(node, "output_colorspace"))?.value || "";
+        return { in_cs: cs, out_cs: cs, raw: "1" };
+    }
+    return { in_cs: W(node, "input_colorspace")?.value || "", out_cs: W(node, "output_colorspace")?.value || "",
+             raw: W(node, "raw_data")?.value ? "1" : "0" };
+}
 function _thumbQuery(node, src) {
-    return new URLSearchParams({ src, in_cs: W(node, "input_colorspace")?.value || "", out_cs: W(node, "output_colorspace")?.value || "",
-        raw: W(node, "raw_data")?.value ? "1" : "0", full: node._ocioPrev?.original ? "1" : "0",
+    return new URLSearchParams({ src, ..._csParams(node), full: node._ocioPrev?.original ? "1" : "0",
         ..._viewParams(node), rand: String(Date.now()) }).toString();
 }
 // ---- Nuke-style transport bar for the video viewport (client-side, drives the hidden <video>; the WebGL loop
@@ -687,9 +704,19 @@ function _pbSeek(p, f) {
 }
 // in / out range = the node's start_frame / end_frame widgets (single source of truth, bidirectional). Widgets
 // store frame numbers; these convert to/from the 0-based index via _seqBase (base 0 = video, unchanged).
-function _pbIn(p) { const base = _dispBase(p), w = W(p.node, "start_frame"); return Math.max(0, Math.min(_pbLast(p), Math.round((w?.value ?? base)) - base)); }
-function _pbOut(p) { const base = _dispBase(p), last = _pbLast(p), w = W(p.node, "end_frame"); return Math.max(_pbIn(p), Math.min(last, Math.round((w?.value ?? (base + last))) - base)); }
-function _pbSetField(p, name, f) { const w = W(p.node, name); if (!w) return; w.value = f; try { w.callback && w.callback(f); } catch (e) {} p.node.setDirtyCanvas(true, true); }
+// A NODE WITH NO start_frame / end_frame KEEPS ITS IN / OUT ON THE PREVIEW STATE INSTEAD OF ON A WIDGET, and that
+// is a rule, not a fallback. On OCIO Write the nearest widgets are first_frame / last_frame, which decide WHICH
+// FRAMES GET WRITTEN - so binding the viewer's handles to them would let dragging a playback control silently
+// change the deliverable. A viewer must never be able to edit the render. p.viewRange is view-only and not
+// serialized, so the handles work, loop and bounce respect them, and the written range is untouchable from here.
+function _pbRange(p) { return (p.viewRange || (p.viewRange = { in: null, out: null })); }
+function _pbIn(p) { const base = _dispBase(p), w = W(p.node, "start_frame"), v = w ? w.value : (_pbRange(p).in ?? base); return Math.max(0, Math.min(_pbLast(p), Math.round(v ?? base) - base)); }
+function _pbOut(p) { const base = _dispBase(p), last = _pbLast(p), w = W(p.node, "end_frame"), v = w ? w.value : (_pbRange(p).out ?? (base + last)); return Math.max(_pbIn(p), Math.min(last, Math.round(v ?? (base + last)) - base)); }
+function _pbSetField(p, name, f) {
+    const w = W(p.node, name);
+    if (!w) { _pbRange(p)[name === "start_frame" ? "in" : "out"] = f; p.node.setDirtyCanvas(true, true); return; }   // view-only in/out (see above)
+    w.value = f; try { w.callback && w.callback(f); } catch (e) {} p.node.setDirtyCanvas(true, true);
+}
 function _pbSetIn(p, f) { const base = _dispBase(p); _pbSetField(p, "start_frame", base + Math.max(0, Math.min(_pbOut(p), Math.round(f)))); }
 function _pbSetOut(p, f) { const base = _dispBase(p); _pbSetField(p, "end_frame", base + Math.max(_pbIn(p), Math.min(_pbLast(p), Math.round(f)))); }
 function _pbResetRange(p) { const base = _dispBase(p); _pbSetField(p, "start_frame", base); _pbSetField(p, "end_frame", base + _pbLast(p)); }
@@ -2837,6 +2864,44 @@ app.registerExtension({
                     }
                 } else if (this._ocioAudio || this._ocioMeta) {
                     this.setDirtyCanvas(true, true);
+                }
+                // THE WRITTEN SEQUENCE, SCRUBBABLE. A sequence write reports seq_src / seq_start / seq_count /
+                // seq_fps instead of one static ui.images frame, and that turns the Write's preview into the SAME
+                // viewer the Read has: play, reverse, stop, step, scrub, in / out, loop / bounce - running over the
+                // frames it just put on disk. Reading the FILES is the point. This is not the tensor that was in
+                // memory, it is the deliverable, so what you scrub has been through the bit depth, the compression
+                // and the colorspace conversion, and a fault introduced by the write itself is visible here.
+                //
+                // It costs the render NOTHING: frames are pulled lazily from /ocio/thumb (the Read's own path),
+                // so the server decodes only the frames actually looked at, after the write has finished.
+                const ss = message && message.seq_src;
+                if (ss && typeof ensureReadPreview === "function") {
+                    const one = (v) => (Array.isArray(v) ? v[0] : v);
+                    const num = (v, d) => { const n = parseFloat(one(v)); return isFinite(n) ? n : d; };
+                    const p = ensureReadPreview(this);
+                    p.node = this;                                    // _seqUrl / _seqTick read the node off the preview state
+                    _startSeqViewport(this, p, String(one(ss)), { orig_start: num(message.seq_start, 0),
+                                                                  count: Math.max(1, num(message.seq_count, 1)) });
+                    // The rate the frames were WRITTEN at, which is what they should play at. Set after
+                    // _startSeqViewport because that reads the fps widget, and this is the authoritative value.
+                    p.pb.fps = num(message.seq_fps, p.pb.fps || 24);
+                    // Same "▾ Viewer" fold the Read has, so a Write does not have to stay tall once you have
+                    // looked. Added on the first render rather than at node creation: a Write that has never run
+                    // has nothing to fold, and this way an existing graph gains no widget until it produces one.
+                    if (!this._ocioViewerToggle) {
+                        const self = this;
+                        const t = this.addWidget("button", "▾ Viewer", null, () => {
+                            const c = !self._ocioReadCollapsed; self._ocioReadCollapsed = c;
+                            if (typeof _setWidgetLabel === "function") _setWidgetLabel(t, (c ? "▸" : "▾") + " Viewer");
+                            else t.name = (c ? "▸" : "▾") + " Viewer";
+                            const pp = self._ocioPrev;
+                            if (pp && pp.transport) pp.transport.bar.style.display = c ? "none" : ((pp.pb && pp.pb.showTransport) ? "flex" : "none");
+                            if (pp && pp.box) pp.box.style.display = c ? "none" : "flex";
+                            self.setSize([self.size[0], self.computeSize()[1]]);
+                            self.setDirtyCanvas(true, true);
+                        }, { serialize: false });
+                        this._ocioViewerToggle = t;
+                    }
                 }
             };
         }

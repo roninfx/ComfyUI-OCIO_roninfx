@@ -3795,6 +3795,7 @@ class OCIOWrite:
 
         rate = float(fps) if fps and fps > 0 else 24.0
         apcm, audio_note = None, ""
+        seq_info = None      # set by the sequence branch: what the on-node flipbook plays back (see the ui build below)
         # ---- metadata: what WE author about our own output, then whatever the source plate can legally add ----
         # THE PLATE IS READ FIRST, because the start timecode is now inherited from it rather than typed into
         # this node, and _authored_attrs needs that start before it can lay the per-frame code down. Everything
@@ -3928,6 +3929,20 @@ class OCIOWrite:
                     _save_still(paths[i], sub[i], still_format, bit_depth, alpha_of(sub_a, i, sub[i]), cs, compression,
                                 _frame_attrs(still_attrs, i, as_text))
                 saved = paths[0]
+                # WHAT THE ON-NODE FLIPBOOK PLAYS. A sequence write used to report one static frame, so the
+                # deliverable a Write exists to make was the one thing you could not step through - while the Read
+                # feeding it had a full transport. These four values are all the front end needs to drive the same
+                # flipbook over the files THAT WERE JUST WRITTEN (web/ocio_io.js, via /ocio/thumb): where they are,
+                # what frame the first one is, how many, and how fast. It reads the FILES, not a cached tensor, so
+                # what you scrub is the actual output on disk - compression, bit depth, colorspace and all.
+                # The frame number comes from the filename rather than start_number so it cannot disagree with what
+                # _write_output_paths actually stamped; start_number is the fallback.
+                _m = _VERSION_RE.sub("", os.path.basename(paths[0]))
+                _fn = re.findall(r"(\d+)", _m)
+                seq_info = {"src": paths[0],
+                            "start": int(_fn[-1]) if _fn else int(start_number),
+                            "count": len(paths),
+                            "fps": rate}
                 if still_attrs:
                     # ONE sidecar for the whole sequence, not one per frame: the attributes are shot-level, and
                     # N copies of the same JSON is noise an artist has to tidy up. The per-frame parts are given
@@ -4034,6 +4049,17 @@ class OCIOWrite:
             # servable H.264 preview into the temp dir and show it as an animated (playing) preview instead.
             ui["images"] = self._video_preview(sub, fps, saved, apcm)      # apcm, not the raw AUDIO: it is already cut to this write's range, so the preview cannot disagree with the master about where the clip starts
             ui["animated"] = (True,)
+        elif seq_info is not None:
+            # A SEQUENCE GETS THE FLIPBOOK INSTEAD OF ui.images, not as well as it. ComfyUI paints node.imgs
+            # itself, independently of our DOM widget, so emitting both would stack a static thumbnail on top of
+            # the scrubbable one - the same double-preview OCIORead avoids by emitting no images at all (see the
+            # note in its own return). The front end renders these frames through /ocio/thumb with the viewer LUT.
+            ui["seq_src"] = [seq_info["src"]]
+            ui["seq_start"] = [str(seq_info["start"])]
+            ui["seq_count"] = [str(seq_info["count"])]
+            ui["seq_fps"] = [f"{seq_info['fps']:g}"]
+            # The colorspace the files on disk are ACTUALLY in - what the viewer LUT must be told its source is.
+            ui["seq_cs"] = [from_colorspace if raw_data else output_colorspace]
         else:
             # the preview frame is in output_colorspace (or raw = from_colorspace); that is the LUT's source
             ui["images"] = self._preview(preview, (from_colorspace if raw_data else output_colorspace),
