@@ -1141,7 +1141,15 @@ async function fillRange(node, source, opts) {
         if (d && (d.kind === "sequence" || d.kind === "video")) {
             put("start_frame", d.start | 0);
             put("end_frame", d.end | 0);
-            put("frame_shift", d.start | 0);                   // default: first frame keeps its source number
+            // frame_shift is NOT written here on purpose (2026-08-18, was `put("frame_shift", d.start | 0)`).
+            // base = (frame_shift || source_start) + frame_offset - so writing frame_shift = d.start produces
+            // the IDENTICAL numeric base as leaving it 0 (the source-start fallback), every time, because it
+            // is set to the very value that fallback would already supply. The only effect of writing it was
+            // making applyReadVis treat an inert field as "set" (its rule: shown while non-zero, hidden while
+            // 0/inert), so every fresh detect surfaced a numbering control that was doing nothing. Worse, that
+            // snapshot goes STALE the moment start_frame changes without a fresh detect - a stale override then
+            // ranks ABOVE the dynamic fallback it used to match. Leaving it unwritten keeps it correctly hidden
+            // and correctly dynamic; a real re-base is still exactly one field edit away, same as before.
             if (d.fps) put("fps", Math.round(d.fps * 1000) / 1000);
             if (d.input_cs) put("input_colorspace", d.input_cs);   // folder path has no ext -> fix EXR auto-detect (sRGB -> ACEScg) from the resolved first frame
             // the transport ruler + in/out span the REAL file frame count (authoritative), not video.duration
