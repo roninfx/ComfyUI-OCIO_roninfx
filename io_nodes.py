@@ -3378,6 +3378,33 @@ def _versioned(name, version):
     return f"{name}_v{int(version):03d}"
 
 
+def _shot_folder(folder, name, auto_version=True):
+    """The one folder that holds EVERY render of `name`. SINGLE SOURCE OF TRUTH for write(), the overwrite check
+    and the cross-Write version scan - they must all agree or the "file exists?" prompt inspects a folder the
+    render never touches.
+
+    THERE ARE TWO DIFFERENT VERSIONS IN PLAY and conflating them is what made the old layout wrong. The WORKFLOW
+    has a version, which is part of its name and changes when the artist decides it does (`..._workflow_v02`).
+    A RENDER has a version, which is "how many times I have pressed render", and that one belongs to the output.
+    So the name gives the FOLDER and the render count gives what is inside it:
+
+        output/<workflow name>/                       <- one folder per workflow, never versioned
+            <workflow name>_v001/                     <- render 1's EXR sequence, in its own subdirectory
+                <workflow name>_v001_acescg.1001.exr
+            <workflow name>_v001_rec709.mp4           <- render 1's movie, beside the sequence it came from
+            <workflow name>_v002/ ...                 <- render 2, and so on
+
+    Everything one render produced therefore shares a folder AND a version, and the output dir holds one entry
+    per workflow instead of a flat pile that grows by several files every time anyone hits render.
+
+    auto_version off = the artist is doing their own numbering, so the folder is used exactly as typed. Taking
+    that over would defeat the switch that exists to hand versioning to a pipeline.
+    """
+    if not auto_version or not name or not folder:
+        return folder
+    return os.path.join(folder, name)
+
+
 # EVERY OCIO Write in one execution must land on the SAME version - an EXR master and its MP4 review that
 # disagree are not a delivery, they are two half-deliveries. Resolving per node cannot achieve that: the first
 # Write creates v003 on disk, and the second then scans, sees it, and picks v004. Worse, two Writes pointed at
@@ -3411,7 +3438,7 @@ def _write_folders_in_prompt(prompt, name):
             if not isinstance(fn, str) or fn.strip() != name:   # a wired filename is a link list, not a str
                 continue
             try:
-                f = resolve_output_folder(ins.get("output_folder", "") or "")
+                f = _shot_folder(resolve_output_folder(ins.get("output_folder", "") or ""), name)   # the SHOT folder, which is where its versions actually are
             except Exception:
                 continue
             if f and f not in out:
@@ -3452,6 +3479,7 @@ def _write_output_paths(folder, filename, container, still_format, video_codec, 
     # one past the highest. Resolved HERE rather than in write() so the /ocio/write_paths overwrite check and
     # the actual write agree on the name; two different answers would make the "file exists?" prompt lie.
     if auto_version:
+        folder = _shot_folder(folder, name)              # output/<workflow>/ - the same layout write() uses
         name = _versioned(name, _next_version(folder, name))
     tag = ("raw" if raw_data else _cs_tag(output_colorspace)) if colorspace_in_name else ""
     stem = f"{name}_{tag}" if tag else name
@@ -3777,9 +3805,14 @@ class OCIOWrite:
         _eff_folder = folder
         if auto_version:
             _base = (str(filename) or "").strip() or "ocio_out"
-            _eff_name = _versioned(_base, _shared_version(prompt, folder, _base))
+            _eff_folder = _shot_folder(folder, _base)          # output/<workflow>/ - see _shot_folder for the layout
+            os.makedirs(_eff_folder, exist_ok=True)
+            # Scanned in the SHOT folder, not the output root: that is where the previous renders of this name
+            # are, and it is what makes the count "how many times render was pressed" rather than a number that
+            # collides with every other workflow writing into the same output dir.
+            _eff_name = _versioned(_base, _shared_version(prompt, _eff_folder, _base))
             if container == "sequence":
-                _eff_folder = os.path.join(folder, _eff_name)
+                _eff_folder = os.path.join(_eff_folder, _eff_name)
                 os.makedirs(_eff_folder, exist_ok=True)
 
         def _wp(cnt, still_frame=None):
