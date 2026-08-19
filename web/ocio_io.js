@@ -2173,7 +2173,8 @@ function playerVideoStart(node, p, path, meta) {
 // transform - the Player would show the untouched video, ignoring the intermediate node. So when one is crossed, the
 // trace returns null and the caller falls through to a normal render of the PROCESSED (materialized, capped) batch.
 const OCIO_PROC_TYPES = new Set(["OCIOLogConvert", "OCIOColorSpace", "OCIODisplay", "OCIOCDLTransform",
-    "OCIOFileTransform", "OCIOLookTransform", "OCIOGrade", "OCIOGradeMatch", "OCIOApplyGrade", "OCIOInputSelector"]);
+    "OCIOFileTransform", "OCIOLookTransform", "OCIOGrade", "OCIOGradeMatch", "OCIOApplyGrade",
+    "OCIOInputSelector", "OCIOSourceBridge"]);
 function _playerTraceVideoSrc(node, seen, crossedProc) {
     try {
         seen = seen || new Set();

@@ -1060,6 +1060,121 @@ class OCIOLookTransform:
         return _dual_io(lambda img: _blend(img, _apply_processor(img, cpu), mix), image, video, label="OCIO LookTransform")
 
 
+# One recipe per source TYPE, not per node - this is this pipeline's fixed, deliberate design (confirmed
+# explicitly: raw scene-linear content is expected to be ACES-Rec709-ODT-encoded on disk, and 8-bit sRGB
+# content needs re-encoding to that same space FIRST - see OCIOSourceBridge's own docstring for the why).
+# Each step mirrors exactly what the pack's own OCIOColorSpace / OCIODisplay nodes do, in the same order
+# this workflow already used them, so a preset produces bit-identical output to the chain it replaces:
+#   ("cs", in, out)                         - OCIOColorSpace: cfg.getProcessor(in, out)
+#   ("display_inverse", in, display, view)  - OCIODisplay with invert_direction=True
+_BRIDGE_RECIPES = {
+    # EXR is already ACEScg - one step, straight to the log working space.
+    "EXR": [("cs", "ACEScg", "ACEScct")],
+    # mp4 carries a baked ACES 1.0 Rec.709 output transform (this pipeline made it that way - see Write2)
+    # - invert that ODT to recover ACEScg, then encode to ACEScct.
+    "MP4": [("display_inverse", "ACEScg", "Rec.1886 Rec.709 - Display", "ACES 1.0 - SDR Video"),
+            ("cs", "ACEScg", "ACEScct")],
+    # PNG is plain 8-bit sRGB, not Rec.709-ODT'd - re-encode to Rec.709 first so the SAME inverse-ODT step
+    # above receives what it expects, then continue exactly as the mp4 recipe does.
+    "PNG": [("cs", "sRGB - Display", "Rec.1886 Rec.709 - Display"),
+            ("display_inverse", "ACEScg", "Rec.1886 Rec.709 - Display", "ACES 1.0 - SDR Video"),
+            ("cs", "ACEScg", "ACEScct")],
+}
+
+
+def _bridge_apply(frames, cfg, cfg_key, recipe):
+    """Run `frames` through a _BRIDGE_RECIPES chain, step by step. Each step is cached exactly like a single
+    OCIOColorSpace / OCIODisplay node would cache it (same _cached_cpu_processor, same key shape), so running
+    the chain inside one node costs no more than the separate nodes it replaces did."""
+    for step in recipe:
+        if step[0] == "cs":
+            _, in_cs, out_cs = step
+            tf_key = ("colorspace", in_cs, out_cs)
+            cpu = _cached_cpu_processor(cfg_key, tf_key,
+                                        lambda in_cs=in_cs, out_cs=out_cs: cfg.getProcessor(in_cs, out_cs))
+        elif step[0] == "display_inverse":
+            _, in_cs, display, view = step
+            tf_key = ("display", in_cs, display, view, True)
+
+            def build(in_cs=in_cs, display=display, view=view):
+                t = OCIO.DisplayViewTransform(src=in_cs, display=display, view=view)
+                t.setDirection(OCIO.TRANSFORM_DIR_INVERSE)
+                return cfg.getProcessor(t)
+
+            cpu = _cached_cpu_processor(cfg_key, tf_key, build)
+        else:
+            raise RuntimeError(f"OCIO Source Bridge: unknown recipe step {step!r}")
+        frames = _apply_processor(frames, cpu)
+    return frames
+
+
+class OCIOSourceBridge:
+    """The colour chain a source TYPE needs before it can join the ACEScct working space, picked by `preset`
+    instead of built node-by-node on the canvas. Nuke has no equivalent - a Nuke artist wires the two or three
+    nodes each plate format needs by hand, every time. This node carries three fixed recipes (see
+    _BRIDGE_RECIPES) so the same choice - "this is an EXR / mp4 / PNG plate" - both configures and hides that
+    wiring: one Read plugs into one instance of this node with the matching preset, and what used to be two or
+    three separate OCIODisplay / OCIOColorSpace nodes on the canvas is now a single widget.
+
+    WHY THE RECIPES DIFFER, in one place rather than re-derived per graph: an EXR sequence in this pipeline is
+    already ACEScg, so it needs only the log encode. An mp4 this pipeline itself wrote (see Write2) carries a
+    BAKED ACES 1.0 Rec.709 output transform - a real tone-map, not just a gamma curve - so recovering ACEScg
+    means inverting that exact transform. An 8-bit PNG plate is neither: it is plain sRGB, gamma-encoded but
+    never tone-mapped, so feeding it straight into the mp4 recipe's inverse-ODT step would apply a tone-map
+    inversion to data that was never tone-mapped forward - confirmed by measurement earlier in this pipeline's
+    development (the recovered ACEScg mean landed near the true reference once the extra sRGB -> Rec.709
+    re-encode step was added first, not before). So PNG's recipe is the mp4 recipe with that one step ahead of
+    it, and EXR's is neither, because none of this applies to data that was never display-encoded at all.
+
+    The recipes are NOT exposed as separate colorspace pickers on this node, on purpose: they are this
+    pipeline's fixed, measured-correct design, and the whole point of collapsing them into a preset is that
+    picking the wrong intermediate colorspace by hand - the actual, repeated failure mode earlier in this same
+    pipeline's history - stops being possible here. `config_path` still varies freely; that picks WHICH .ocio
+    config supplies the named colorspaces, not what the recipe does with them.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {
+            "preset": (["EXR", "MP4", "PNG"], {"default": "EXR",
+                       "tooltip": "Which fixed OCIO recipe to run (see this node's own docstring for exactly "
+                                  "what each does). Match this to what is actually wired into 'video': the "
+                                  "recipe is picked by this widget, not detected from the data."}),
+        }, "optional": {
+            "image": ("IMAGE",), "video": ("VIDEO",), "config_path": _config_input(),
+            "view_display": _preview_view_display(),
+            "view_transform": _preview_view_transform(),
+            "preview": ("BOOLEAN", {"default": True,
+                        "tooltip": "Render this node's on-node preview. OFF skips it entirely."}),
+            "preview_frame": ("STRING", {"default": "0", "multiline": False,
+                              "tooltip": "Which frame the on-node preview shows, 0-based. Blank or unreadable means 0."}),
+        }, "hidden": {"unique_id": "UNIQUE_ID"}}
+
+    RETURN_TYPES = ("IMAGE", "VIDEO")
+    RETURN_NAMES = ("image/sequence/video", "ComfyUI Video")
+    OUTPUT_TOOLTIPS = ("The source, converted to ACEScct by the preset's fixed recipe.",
+                       "Same conversion as a ComfyUI VIDEO (carries data only when a VIDEO is fed in).")
+    FUNCTION = "bridge"
+    CATEGORY = "OCIO"
+
+    def bridge(self, preset="EXR", image=None, video=None, config_path=BUILTIN,
+               view_display=None, view_transform=None, preview=True, preview_frame="0", unique_id="0"):
+        _require_ocio()
+        cfg, cfg_key = _config_from_choice_keyed(config_path)
+        if cfg is None:
+            raise RuntimeError("No OCIO config found.")
+        recipe = _BRIDGE_RECIPES.get(preset)
+        if recipe is None:
+            raise RuntimeError(f"OCIO Source Bridge: preset '{preset}' is not one of {list(_BRIDGE_RECIPES)}.")
+        out_img, out_vid = _dual_io(lambda img: _bridge_apply(img, cfg, cfg_key, recipe), image, video,
+                                    label=f"OCIO Source Bridge ({preset})")
+        show = True if preview is None else bool(preview)
+        # Always ACEScct: that is what every recipe above ends on, regardless of which one ran.
+        ui = (_preview_ui(out_img, "ACEScct", view_display, view_transform, f"ocio_bridge_{unique_id}",
+                          preview_frame) if show else None)
+        return {"ui": ui, "result": (out_img, out_vid)} if ui else (out_img, out_vid)
+
+
 class OCIOInputSelector:
     """One node standing in for several parallel source chains (Nuke has no equivalent - this is a pipeline
     convenience, not an OCIO primitive). `preset` picks which of up to four already-wired VIDEO chains reaches
@@ -1140,6 +1255,7 @@ NODE_CLASS_MAPPINGS = {
     "OCIOCDLTransform": OCIOCDLTransform,
     "OCIOFileTransform": OCIOFileTransform,
     "OCIOLookTransform": OCIOLookTransform,
+    "OCIOSourceBridge": OCIOSourceBridge,
     "OCIOInputSelector": OCIOInputSelector,
 }
 
@@ -1150,5 +1266,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "OCIOCDLTransform": "OCIO CDLTransform",
     "OCIOFileTransform": "OCIO FileTransform",
     "OCIOLookTransform": "OCIO LookTransform",
+    "OCIOSourceBridge": "OCIO Source Bridge",
     "OCIOInputSelector": "OCIO Input Selector",
 }
