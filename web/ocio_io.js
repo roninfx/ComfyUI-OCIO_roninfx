@@ -2173,7 +2173,7 @@ function playerVideoStart(node, p, path, meta) {
 // transform - the Player would show the untouched video, ignoring the intermediate node. So when one is crossed, the
 // trace returns null and the caller falls through to a normal render of the PROCESSED (materialized, capped) batch.
 const OCIO_PROC_TYPES = new Set(["OCIOLogConvert", "OCIOColorSpace", "OCIODisplay", "OCIOCDLTransform",
-    "OCIOFileTransform", "OCIOLookTransform", "OCIOGrade", "OCIOGradeMatch", "OCIOApplyGrade"]);
+    "OCIOFileTransform", "OCIOLookTransform", "OCIOGrade", "OCIOGradeMatch", "OCIOApplyGrade", "OCIOInputSelector"]);
 function _playerTraceVideoSrc(node, seen, crossedProc) {
     try {
         seen = seen || new Set();
@@ -3071,6 +3071,83 @@ app.registerExtension({
                 }
                 return res;
             };
+            return r;
+        };
+    },
+});
+
+// ---------------------------------------------------------------------------------------------------------
+// OCIO Input Selector: `preset` is both a value picker (Python reads whichever socket it names) AND, here,
+// the SAME group toggle this pack already uses for Model select / Source select - picking a preset mutes
+// the OTHER presets' SOURCE groups, so an unpicked branch does not merely get ignored, it does not RUN.
+// Manual mutes all three - the point of Manual is to ignore the presets entirely, so their branches should
+// not pay to compute either. Group titles are matched by regex, read from node PROPERTIES so a workflow
+// whose groups are not named this pack's way can still use this (panel_set_property to override); the
+// defaults match the 'SOURCE — EXR / mp4 / PNG' naming this pack's own examples already use.
+//
+// Deliberately NOT reaching into rgthree's FAST_GROUPS_SERVICE: that object lives in a different
+// extension's module scope with no guaranteed export across pack versions, and the group-collection
+// algorithm it runs (root groups + subgraph-definition groups, geometric membership) is small enough to
+// duplicate exactly here rather than risk depending on undocumented internals breaking silently on update.
+const OCIO_PRESET_TITLE_PROP = { EXR: "matchTitleExr", MP4: "matchTitleMp4", PNG: "matchTitlePng" };
+const OCIO_PRESET_TITLE_DEFAULT = { EXR: "^SOURCE — EXR", MP4: "^SOURCE — mp4", PNG: "^SOURCE — PNG" };
+function _ocioPresetGroups(node) {
+    const canvas = app.canvas;
+    const graph = (canvas && canvas.getCurrentGraph) ? (canvas.getCurrentGraph() || app.graph) : app.graph;
+    const groups = [...((graph && graph._groups) || [])];
+    const subgraphs = graph && graph.subgraphs && graph.subgraphs.values ? graph.subgraphs.values() : null;
+    if (subgraphs) { let s; while ((s = subgraphs.next().value)) groups.push(...(s.groups || [])); }
+    const out = {};
+    for (const key of Object.keys(OCIO_PRESET_TITLE_PROP)) {
+        const pat = (node.properties && node.properties[OCIO_PRESET_TITLE_PROP[key]]) || OCIO_PRESET_TITLE_DEFAULT[key];
+        let re;
+        try { re = new RegExp(pat, "i"); } catch (e) { continue; }   // a broken user-edited pattern disables that preset's toggle, not the whole node
+        out[key] = groups.filter((g) => re.test(g.title || ""));
+    }
+    return out;
+}
+function _ocioGroupNodes(group) {
+    // Group membership is geometric, not a stored list - same centre-in-bounding-box test as
+    // rgthree's FastGroupsService, duplicated rather than imported (see the note above).
+    const b = group._bounding; if (!b) return [];
+    return ((app.graph && app.graph._nodes) || []).filter((n) => {
+        if (!n.pos || !n.size) return false;
+        const cx = n.pos[0] + n.size[0] / 2, cy = n.pos[1] + n.size[1] / 2;
+        return cx >= b[0] && cx < b[0] + b[2] && cy >= b[1] && cy < b[1] + b[3];
+    });
+}
+function _ocioApplyPresetGroups(node, preset) {
+    try {
+        const byPreset = _ocioPresetGroups(node);
+        for (const key of Object.keys(byPreset)) {
+            const active = key === preset;   // Manual (and any preset this node does not recognize) mutes every group
+            for (const g of byPreset[key]) {
+                for (const n of _ocioGroupNodes(g)) {
+                    n.mode = active ? LiteGraph.ALWAYS : LiteGraph.NEVER;
+                    if (n.setDirtyCanvas) n.setDirtyCanvas(true, true);
+                }
+            }
+        }
+        if (app.graph && app.graph.setDirtyCanvas) app.graph.setDirtyCanvas(true, true);
+    } catch (e) { console.warn("[OCIO] Input Selector preset-group toggle failed:", e); }   // a toggle failure must never break the widget click itself
+}
+app.registerExtension({
+    name: "ocio.input.selector.preset",
+    async beforeRegisterNodeDef(nodeType, nodeData) {
+        if (nodeData.name !== "OCIOInputSelector") return;
+        const onCreated = nodeType.prototype.onNodeCreated;
+        nodeType.prototype.onNodeCreated = function () {
+            const r = onCreated ? onCreated.apply(this, arguments) : undefined;
+            const node = this;
+            const w = W(node, "preset");
+            if (w) {
+                const orig = w.callback;
+                w.callback = function (v) {
+                    const res = orig ? orig.apply(this, arguments) : undefined;
+                    _ocioApplyPresetGroups(node, v);
+                    return res;
+                };
+            }
             return r;
         };
     },

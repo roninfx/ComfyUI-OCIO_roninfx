@@ -1060,6 +1060,79 @@ class OCIOLookTransform:
         return _dual_io(lambda img: _blend(img, _apply_processor(img, cpu), mix), image, video, label="OCIO LookTransform")
 
 
+class OCIOInputSelector:
+    """One node standing in for several parallel source chains (Nuke has no equivalent - this is a pipeline
+    convenience, not an OCIO primitive). `preset` picks which of up to four already-wired VIDEO chains reaches
+    the output; the other three are simply not read. 'Manual' is the escape hatch: it ignores the three preset
+    sockets entirely and passes `manual_video` straight through, for whenever the presets do not fit.
+
+    WHY THIS EXISTS RATHER THAN JUST WIRING an Any Switch (rgthree) to the same three sockets: that only
+    changes which VALUE reaches the output - every wired branch still executes (Any Switch has no way to stop
+    a node it does not own), so an unwanted 4K EXR sequence decodes every render whether picked or not. This
+    node's own PICK is exactly that same value-selection - it costs nothing extra over an Any Switch - but the
+    front end (web/ocio_io.js) ALSO drives the matching SOURCE group's mode when `preset` changes: the chosen
+    group goes active, the other two (and Manual's, when a preset is chosen) go mute. That is what makes an
+    unpicked branch not run at all, the same mechanism already proven for this workflow's Model select /
+    Source select toggles, just triggered from one combo instead of three buttons. Group titles are matched by
+    the `presetGroupsExr` / `...Mp4` / `...Png` node PROPERTIES (regex, default matches this pack's own
+    'SOURCE — EXR / mp4 / PNG' naming) - set them with panel_set_property if a graph's groups are named
+    differently. The Python side below does not know or care whether that happened; it only ever reads
+    whichever socket is non-None, which is why a mismatched title just means the unpicked branches keep
+    computing rather than anything breaking.
+
+    THE PREVIEW is hardcoded to assume ACEScct, not exposed as a picker. Every preset in this pack's own
+    pipeline design ends its chain in an OCIOColorSpace node outputting ACEScct (OCIOColorSpace1 for the mp4
+    and PNG bridges, OCIOColorSpace2 for the EXR one) - so 'show the preview of whichever is last in the
+    active chain' and 'assume ACEScct' are the same statement here. A graph that feeds this node something
+    else will get a mislabelled preview (display maths run against the wrong source curve) but never a wrong
+    OUTPUT - the assumption only touches _preview_ui's cosmetic viewer LUT, not the passthrough itself.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {
+            "preset": (["EXR", "MP4", "PNG", "Manual"], {"default": "EXR",
+                       "tooltip": "Which wired VIDEO socket reaches the output. The front end also mutes the "
+                                  "other presets' SOURCE groups when this changes, so an unpicked chain does "
+                                  "not just get ignored - it does not run."}),
+        }, "optional": {
+            "exr_video": ("VIDEO", {"tooltip": "Wire the EXR chain's last node here (its OCIOColorSpace, ACEScg -> ACEScct)."}),
+            "mp4_video": ("VIDEO", {"tooltip": "Wire the MP4 chain's last node here (its OCIOColorSpace, sRGB -> ACEScct)."}),
+            "png_video": ("VIDEO", {"tooltip": "Wire the PNG chain's last node here (its OCIOColorSpace, sRGB -> ACEScct)."}),
+            "manual_video": ("VIDEO", {"tooltip": "Used only when preset = Manual. Wire anything here to bypass the three presets entirely."}),
+            # Viewer LUT + preview widgets: same shape and same positional-safety reasoning as OCIOColorSpace's
+            # (appended last so a saved graph's earlier widgets_values never shift). See OCIOColorSpace's own
+            # INPUT_TYPES for the full note on why preview_frame is a STRING and preview a tri-state-safe BOOLEAN.
+            "view_display": _preview_view_display(),
+            "view_transform": _preview_view_transform(),
+            "preview": ("BOOLEAN", {"default": True,
+                        "tooltip": "Render this node's on-node preview (mirrors whichever preset is active). OFF skips it entirely."}),
+            "preview_frame": ("STRING", {"default": "0", "multiline": False,
+                              "tooltip": "Which frame the on-node preview shows, 0-based. Blank or unreadable means 0."}),
+        }, "hidden": {"unique_id": "UNIQUE_ID"}}
+
+    RETURN_TYPES = ("IMAGE", "VIDEO")
+    RETURN_NAMES = ("image/sequence/video", "ComfyUI Video")
+    OUTPUT_TOOLTIPS = ("The selected preset's frames.", "The selected preset's VIDEO, unmodified.")
+    FUNCTION = "select"
+    CATEGORY = "OCIO"
+
+    def select(self, preset="EXR", exr_video=None, mp4_video=None, png_video=None, manual_video=None,
+               view_display=None, view_transform=None, preview=True, preview_frame="0", unique_id="0"):
+        picked = {"EXR": exr_video, "MP4": mp4_video, "PNG": png_video, "Manual": manual_video}.get(preset)
+        if picked is None:
+            socket = {"EXR": "exr_video", "MP4": "mp4_video", "PNG": "png_video",
+                      "Manual": "manual_video"}.get(preset, "?")
+            raise RuntimeError(f"OCIO Input Selector: preset is '{preset}' but '{socket}' has nothing wired to "
+                                f"it (or its source is muted). Wire that socket, or pick a different preset.")
+        frames, fr, audio = _video_unwrap(picked)
+        out_vid = _video_wrap(frames, fr, audio)
+        show = True if preview is None else bool(preview)
+        ui = (_preview_ui(frames, "ACEScct", view_display, view_transform, f"ocio_insel_{unique_id}",
+                          preview_frame) if show else None)
+        return {"ui": ui, "result": (frames, out_vid)} if ui else (frames, out_vid)
+
+
 NODE_CLASS_MAPPINGS = {
     "OCIOColorSpace": OCIOColorSpace,
     "OCIOLogConvert": OCIOLogConvert,
@@ -1067,6 +1140,7 @@ NODE_CLASS_MAPPINGS = {
     "OCIOCDLTransform": OCIOCDLTransform,
     "OCIOFileTransform": OCIOFileTransform,
     "OCIOLookTransform": OCIOLookTransform,
+    "OCIOInputSelector": OCIOInputSelector,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -1076,4 +1150,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "OCIOCDLTransform": "OCIO CDLTransform",
     "OCIOFileTransform": "OCIO FileTransform",
     "OCIOLookTransform": "OCIO LookTransform",
+    "OCIOInputSelector": "OCIO Input Selector",
 }
