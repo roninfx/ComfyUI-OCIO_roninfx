@@ -1060,192 +1060,34 @@ class OCIOLookTransform:
         return _dual_io(lambda img: _blend(img, _apply_processor(img, cpu), mix), image, video, label="OCIO LookTransform")
 
 
-# One recipe per source TYPE, not per node - this is this pipeline's fixed, deliberate design (confirmed
-# explicitly: raw scene-linear content is expected to be ACES-Rec709-ODT-encoded on disk, and 8-bit sRGB
-# content needs re-encoding to that same space FIRST - see OCIOSourceBridge's own docstring for the why).
-# Each step mirrors exactly what the pack's own OCIOColorSpace / OCIODisplay nodes do, in the same order
-# this workflow already used them, so a preset produces bit-identical output to the chain it replaces:
-#   ("cs", in, out)                         - OCIOColorSpace: cfg.getProcessor(in, out)
-#   ("display_inverse", in, display, view)  - OCIODisplay with invert_direction=True
-_BRIDGE_RECIPES = {
-    # EXR is already ACEScg - one step, straight to the log working space.
-    "EXR": [("cs", "ACEScg", "ACEScct")],
-    # mp4 carries a baked ACES 1.0 Rec.709 output transform (this pipeline made it that way - see Write2)
-    # - invert that ODT to recover ACEScg, then encode to ACEScct.
-    "MP4": [("display_inverse", "ACEScg", "Rec.1886 Rec.709 - Display", "ACES 1.0 - SDR Video"),
-            ("cs", "ACEScg", "ACEScct")],
-    # PNG is plain 8-bit sRGB, not Rec.709-ODT'd - re-encode to Rec.709 first so the SAME inverse-ODT step
-    # above receives what it expects, then continue exactly as the mp4 recipe does.
-    "PNG": [("cs", "sRGB - Display", "Rec.1886 Rec.709 - Display"),
-            ("display_inverse", "ACEScg", "Rec.1886 Rec.709 - Display", "ACES 1.0 - SDR Video"),
-            ("cs", "ACEScg", "ACEScct")],
-}
+class OCIOPresetControl:
+    """A pure UI control, nothing more: one `preset` combo (EXR/MP4/PNG) and no image data of its own. It is
+    meant to live INSIDE a CoSA_OCIO-style subgraph - one built the Nuke way, as real daisy-chained
+    OCIOColorSpace / OCIODisplay nodes for each source type, not hidden Python maths. This node's only job is
+    to be the ONE widget web/ocio_io.js can attach a callback to: changing `preset` mutes the OTHER two
+    chains' SOURCE groups (see the `ocio.preset.control` extension), so only the picked chain actually runs,
+    and its widget gets promoted to the subgraph's boundary so the dropdown shows on the collapsed box.
 
-
-def _bridge_apply(frames, cfg, cfg_key, recipe):
-    """Run `frames` through a _BRIDGE_RECIPES chain, step by step. Each step is cached exactly like a single
-    OCIOColorSpace / OCIODisplay node would cache it (same _cached_cpu_processor, same key shape), so running
-    the chain inside one node costs no more than the separate nodes it replaces did."""
-    for step in recipe:
-        if step[0] == "cs":
-            _, in_cs, out_cs = step
-            tf_key = ("colorspace", in_cs, out_cs)
-            cpu = _cached_cpu_processor(cfg_key, tf_key,
-                                        lambda in_cs=in_cs, out_cs=out_cs: cfg.getProcessor(in_cs, out_cs))
-        elif step[0] == "display_inverse":
-            _, in_cs, display, view = step
-            tf_key = ("display", in_cs, display, view, True)
-
-            def build(in_cs=in_cs, display=display, view=view):
-                t = OCIO.DisplayViewTransform(src=in_cs, display=display, view=view)
-                t.setDirection(OCIO.TRANSFORM_DIR_INVERSE)
-                return cfg.getProcessor(t)
-
-            cpu = _cached_cpu_processor(cfg_key, tf_key, build)
-        else:
-            raise RuntimeError(f"OCIO Source Bridge: unknown recipe step {step!r}")
-        frames = _apply_processor(frames, cpu)
-    return frames
-
-
-class OCIOSourceBridge:
-    """The colour chain a source TYPE needs before it can join the ACEScct working space, picked by `preset`
-    instead of built node-by-node on the canvas. Nuke has no equivalent - a Nuke artist wires the two or three
-    nodes each plate format needs by hand, every time. This node carries three fixed recipes (see
-    _BRIDGE_RECIPES) so the same choice - "this is an EXR / mp4 / PNG plate" - both configures and hides that
-    wiring: one Read plugs into one instance of this node with the matching preset, and what used to be two or
-    three separate OCIODisplay / OCIOColorSpace nodes on the canvas is now a single widget.
-
-    WHY THE RECIPES DIFFER, in one place rather than re-derived per graph: an EXR sequence in this pipeline is
-    already ACEScg, so it needs only the log encode. An mp4 this pipeline itself wrote (see Write2) carries a
-    BAKED ACES 1.0 Rec.709 output transform - a real tone-map, not just a gamma curve - so recovering ACEScg
-    means inverting that exact transform. An 8-bit PNG plate is neither: it is plain sRGB, gamma-encoded but
-    never tone-mapped, so feeding it straight into the mp4 recipe's inverse-ODT step would apply a tone-map
-    inversion to data that was never tone-mapped forward - confirmed by measurement earlier in this pipeline's
-    development (the recovered ACEScg mean landed near the true reference once the extra sRGB -> Rec.709
-    re-encode step was added first, not before). So PNG's recipe is the mp4 recipe with that one step ahead of
-    it, and EXR's is neither, because none of this applies to data that was never display-encoded at all.
-
-    The recipes are NOT exposed as separate colorspace pickers on this node, on purpose: they are this
-    pipeline's fixed, measured-correct design, and the whole point of collapsing them into a preset is that
-    picking the wrong intermediate colorspace by hand - the actual, repeated failure mode earlier in this same
-    pipeline's history - stops being possible here. `config_path` still varies freely; that picks WHICH .ocio
-    config supplies the named colorspaces, not what the recipe does with them.
+    Carries a STRING output mirroring the current preset so the node is never an unconsumed dead end - nothing
+    needs to wire it, it exists so it always executes and its widget always has a live node to belong to.
     """
 
     @classmethod
     def INPUT_TYPES(cls):
         return {"required": {
             "preset": (["EXR", "MP4", "PNG"], {"default": "EXR",
-                       "tooltip": "Which fixed OCIO recipe to run (see this node's own docstring for exactly "
-                                  "what each does). Match this to what is actually wired into 'video': the "
-                                  "recipe is picked by this widget, not detected from the data."}),
-        }, "optional": {
-            "image": ("IMAGE",), "video": ("VIDEO",), "config_path": _config_input(),
-            "view_display": _preview_view_display(),
-            "view_transform": _preview_view_transform(),
-            "preview": ("BOOLEAN", {"default": True,
-                        "tooltip": "Render this node's on-node preview. OFF skips it entirely."}),
-            "preview_frame": ("STRING", {"default": "0", "multiline": False,
-                              "tooltip": "Which frame the on-node preview shows, 0-based. Blank or unreadable means 0."}),
-        }, "hidden": {"unique_id": "UNIQUE_ID"}}
+                       "tooltip": "Which daisy-chain inside this group is active. Changing this mutes the "
+                                  "OTHER two chains' SOURCE groups, so only the picked one actually runs."}),
+        }}
 
-    RETURN_TYPES = ("IMAGE", "VIDEO")
-    RETURN_NAMES = ("image/sequence/video", "ComfyUI Video")
-    OUTPUT_TOOLTIPS = ("The source, converted to ACEScct by the preset's fixed recipe.",
-                       "Same conversion as a ComfyUI VIDEO (carries data only when a VIDEO is fed in).")
-    FUNCTION = "bridge"
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("preset",)
+    OUTPUT_TOOLTIPS = ("The active preset name, for reference only - nothing needs to consume this.",)
+    FUNCTION = "run"
     CATEGORY = "OCIO"
 
-    def bridge(self, preset="EXR", image=None, video=None, config_path=BUILTIN,
-               view_display=None, view_transform=None, preview=True, preview_frame="0", unique_id="0"):
-        _require_ocio()
-        cfg, cfg_key = _config_from_choice_keyed(config_path)
-        if cfg is None:
-            raise RuntimeError("No OCIO config found.")
-        recipe = _BRIDGE_RECIPES.get(preset)
-        if recipe is None:
-            raise RuntimeError(f"OCIO Source Bridge: preset '{preset}' is not one of {list(_BRIDGE_RECIPES)}.")
-        out_img, out_vid = _dual_io(lambda img: _bridge_apply(img, cfg, cfg_key, recipe), image, video,
-                                    label=f"OCIO Source Bridge ({preset})")
-        show = True if preview is None else bool(preview)
-        # Always ACEScct: that is what every recipe above ends on, regardless of which one ran.
-        ui = (_preview_ui(out_img, "ACEScct", view_display, view_transform, f"ocio_bridge_{unique_id}",
-                          preview_frame) if show else None)
-        return {"ui": ui, "result": (out_img, out_vid)} if ui else (out_img, out_vid)
-
-
-class OCIOInputSelector:
-    """One node standing in for several parallel source chains (Nuke has no equivalent - this is a pipeline
-    convenience, not an OCIO primitive). `preset` picks which of up to four already-wired VIDEO chains reaches
-    the output; the other three are simply not read. 'Manual' is the escape hatch: it ignores the three preset
-    sockets entirely and passes `manual_video` straight through, for whenever the presets do not fit.
-
-    WHY THIS EXISTS RATHER THAN JUST WIRING an Any Switch (rgthree) to the same three sockets: that only
-    changes which VALUE reaches the output - every wired branch still executes (Any Switch has no way to stop
-    a node it does not own), so an unwanted 4K EXR sequence decodes every render whether picked or not. This
-    node's own PICK is exactly that same value-selection - it costs nothing extra over an Any Switch - but the
-    front end (web/ocio_io.js) ALSO drives the matching SOURCE group's mode when `preset` changes: the chosen
-    group goes active, the other two (and Manual's, when a preset is chosen) go mute. That is what makes an
-    unpicked branch not run at all, the same mechanism already proven for this workflow's Model select /
-    Source select toggles, just triggered from one combo instead of three buttons. Group titles are matched by
-    the `presetGroupsExr` / `...Mp4` / `...Png` node PROPERTIES (regex, default matches this pack's own
-    'SOURCE — EXR / mp4 / PNG' naming) - set them with panel_set_property if a graph's groups are named
-    differently. The Python side below does not know or care whether that happened; it only ever reads
-    whichever socket is non-None, which is why a mismatched title just means the unpicked branches keep
-    computing rather than anything breaking.
-
-    THE PREVIEW is hardcoded to assume ACEScct, not exposed as a picker. Every preset in this pack's own
-    pipeline design ends its chain in an OCIOColorSpace node outputting ACEScct (OCIOColorSpace1 for the mp4
-    and PNG bridges, OCIOColorSpace2 for the EXR one) - so 'show the preview of whichever is last in the
-    active chain' and 'assume ACEScct' are the same statement here. A graph that feeds this node something
-    else will get a mislabelled preview (display maths run against the wrong source curve) but never a wrong
-    OUTPUT - the assumption only touches _preview_ui's cosmetic viewer LUT, not the passthrough itself.
-    """
-
-    @classmethod
-    def INPUT_TYPES(cls):
-        return {"required": {
-            "preset": (["EXR", "MP4", "PNG", "Manual"], {"default": "EXR",
-                       "tooltip": "Which wired VIDEO socket reaches the output. The front end also mutes the "
-                                  "other presets' SOURCE groups when this changes, so an unpicked chain does "
-                                  "not just get ignored - it does not run."}),
-        }, "optional": {
-            "exr_video": ("VIDEO", {"tooltip": "Wire the EXR chain's last node here (its OCIOColorSpace, ACEScg -> ACEScct)."}),
-            "mp4_video": ("VIDEO", {"tooltip": "Wire the MP4 chain's last node here (its OCIOColorSpace, sRGB -> ACEScct)."}),
-            "png_video": ("VIDEO", {"tooltip": "Wire the PNG chain's last node here (its OCIOColorSpace, sRGB -> ACEScct)."}),
-            "manual_video": ("VIDEO", {"tooltip": "Used only when preset = Manual. Wire anything here to bypass the three presets entirely."}),
-            # Viewer LUT + preview widgets: same shape and same positional-safety reasoning as OCIOColorSpace's
-            # (appended last so a saved graph's earlier widgets_values never shift). See OCIOColorSpace's own
-            # INPUT_TYPES for the full note on why preview_frame is a STRING and preview a tri-state-safe BOOLEAN.
-            "view_display": _preview_view_display(),
-            "view_transform": _preview_view_transform(),
-            "preview": ("BOOLEAN", {"default": True,
-                        "tooltip": "Render this node's on-node preview (mirrors whichever preset is active). OFF skips it entirely."}),
-            "preview_frame": ("STRING", {"default": "0", "multiline": False,
-                              "tooltip": "Which frame the on-node preview shows, 0-based. Blank or unreadable means 0."}),
-        }, "hidden": {"unique_id": "UNIQUE_ID"}}
-
-    RETURN_TYPES = ("IMAGE", "VIDEO")
-    RETURN_NAMES = ("image/sequence/video", "ComfyUI Video")
-    OUTPUT_TOOLTIPS = ("The selected preset's frames.", "The selected preset's VIDEO, unmodified.")
-    FUNCTION = "select"
-    CATEGORY = "OCIO"
-
-    def select(self, preset="EXR", exr_video=None, mp4_video=None, png_video=None, manual_video=None,
-               view_display=None, view_transform=None, preview=True, preview_frame="0", unique_id="0"):
-        picked = {"EXR": exr_video, "MP4": mp4_video, "PNG": png_video, "Manual": manual_video}.get(preset)
-        if picked is None:
-            socket = {"EXR": "exr_video", "MP4": "mp4_video", "PNG": "png_video",
-                      "Manual": "manual_video"}.get(preset, "?")
-            raise RuntimeError(f"OCIO Input Selector: preset is '{preset}' but '{socket}' has nothing wired to "
-                                f"it (or its source is muted). Wire that socket, or pick a different preset.")
-        frames, fr, audio = _video_unwrap(picked)
-        out_vid = _video_wrap(frames, fr, audio)
-        show = True if preview is None else bool(preview)
-        ui = (_preview_ui(frames, "ACEScct", view_display, view_transform, f"ocio_insel_{unique_id}",
-                          preview_frame) if show else None)
-        return {"ui": ui, "result": (frames, out_vid)} if ui else (frames, out_vid)
+    def run(self, preset="EXR"):
+        return (preset,)
 
 
 NODE_CLASS_MAPPINGS = {
@@ -1255,8 +1097,7 @@ NODE_CLASS_MAPPINGS = {
     "OCIOCDLTransform": OCIOCDLTransform,
     "OCIOFileTransform": OCIOFileTransform,
     "OCIOLookTransform": OCIOLookTransform,
-    "OCIOSourceBridge": OCIOSourceBridge,
-    "OCIOInputSelector": OCIOInputSelector,
+    "OCIOPresetControl": OCIOPresetControl,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -1266,6 +1107,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "OCIOCDLTransform": "OCIO CDLTransform",
     "OCIOFileTransform": "OCIO FileTransform",
     "OCIOLookTransform": "OCIO LookTransform",
-    "OCIOSourceBridge": "OCIO Source Bridge",
-    "OCIOInputSelector": "OCIO Input Selector",
+    "OCIOPresetControl": "OCIO Preset Control",
 }

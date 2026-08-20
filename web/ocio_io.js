@@ -2173,8 +2173,7 @@ function playerVideoStart(node, p, path, meta) {
 // transform - the Player would show the untouched video, ignoring the intermediate node. So when one is crossed, the
 // trace returns null and the caller falls through to a normal render of the PROCESSED (materialized, capped) batch.
 const OCIO_PROC_TYPES = new Set(["OCIOLogConvert", "OCIOColorSpace", "OCIODisplay", "OCIOCDLTransform",
-    "OCIOFileTransform", "OCIOLookTransform", "OCIOGrade", "OCIOGradeMatch", "OCIOApplyGrade",
-    "OCIOInputSelector", "OCIOSourceBridge"]);
+    "OCIOFileTransform", "OCIOLookTransform", "OCIOGrade", "OCIOGradeMatch", "OCIOApplyGrade"]);
 function _playerTraceVideoSrc(node, seen, crossedProc) {
     try {
         seen = seen || new Set();
@@ -3078,13 +3077,19 @@ app.registerExtension({
 });
 
 // ---------------------------------------------------------------------------------------------------------
-// OCIO Input Selector: `preset` is both a value picker (Python reads whichever socket it names) AND, here,
-// the SAME group toggle this pack already uses for Model select / Source select - picking a preset mutes
-// the OTHER presets' SOURCE groups, so an unpicked branch does not merely get ignored, it does not RUN.
-// Manual mutes all three - the point of Manual is to ignore the presets entirely, so their branches should
-// not pay to compute either. Group titles are matched by regex, read from node PROPERTIES so a workflow
-// whose groups are not named this pack's way can still use this (panel_set_property to override); the
-// defaults match the 'SOURCE — EXR / mp4 / PNG' naming this pack's own examples already use.
+// OCIO Preset Control: a bare `preset` combo, meant to live INSIDE a CoSA_OCIO-style subgraph next to real,
+// hand-daisy-chained OCIOColorSpace / OCIODisplay nodes for each source type - not a node that does any OCIO
+// work itself. Changing `preset` mutes the OTHER presets' SOURCE groups, the SAME group-toggle mechanism
+// this pack already uses for Model select / Source select, just triggered from one promoted combo instead
+// of several buttons. Group titles are matched by regex, read from node PROPERTIES so a workflow whose
+// groups are not named this pack's way can still use this (panel_set_property to override); the defaults
+// match the 'SOURCE — EXR / mp4 / PNG' naming this pack's own examples already use.
+//
+// This is written to work whether `preset`'s callback fires from ROOT (the usual case - the widget is
+// promoted to a subgraph's collapsed boundary, which is where an artist actually clicks it) or from INSIDE
+// the subgraph itself: _ocioPresetGroups walks the CURRENT graph's own groups plus every subgraph
+// DEFINITION's groups reachable from it, which covers both - from root, `graph.subgraphs` includes the
+// CoSA_OCIO definition and its internal SOURCE groups; from inside, they are just `graph._groups` directly.
 //
 // Deliberately NOT reaching into rgthree's FAST_GROUPS_SERVICE: that object lives in a different
 // extension's module scope with no guaranteed export across pack versions, and the group-collection
@@ -3130,12 +3135,12 @@ function _ocioApplyPresetGroups(node, preset) {
             }
         }
         if (app.graph && app.graph.setDirtyCanvas) app.graph.setDirtyCanvas(true, true);
-    } catch (e) { console.warn("[OCIO] Input Selector preset-group toggle failed:", e); }   // a toggle failure must never break the widget click itself
+    } catch (e) { console.warn("[OCIO] Preset Control group toggle failed:", e); }   // a toggle failure must never break the widget click itself
 }
 app.registerExtension({
-    name: "ocio.input.selector.preset",
+    name: "ocio.preset.control",
     async beforeRegisterNodeDef(nodeType, nodeData) {
-        if (nodeData.name !== "OCIOInputSelector") return;
+        if (nodeData.name !== "OCIOPresetControl") return;
         const onCreated = nodeType.prototype.onNodeCreated;
         nodeType.prototype.onNodeCreated = function () {
             const r = onCreated ? onCreated.apply(this, arguments) : undefined;
