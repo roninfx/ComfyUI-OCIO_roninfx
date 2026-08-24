@@ -1090,6 +1090,42 @@ class OCIOPresetControl:
         return (preset,)
 
 
+class OCIOSwitchSelect:
+    """Drives a CoSA_OCIO-style switch stack (Manual / EXR / PNG / MP4) from ONE dropdown. Manual means "act as
+    a normal OCIOColorSpace node" - the manual in/out/mix/etc widgets (promoted alongside this one onto the
+    same collapsed subgraph boundary) actually drive the output. EXR/PNG/MP4 instead select one of the three
+    pre-built daisy-chain recipes, and the manual widgets go along for the ride unused (web/ocio_io.js's
+    `ocio.switch.select.gray` extension visually disables them so that's obvious at a glance).
+
+    Two INT outputs because there are two nested selection layers: `outer_select` (1=Manual, 2=Preset chain)
+    picks between the manual conversion and the preset stack as a whole; `inner_select` (1=EXR, 2=PNG, 3=MP4)
+    picks which preset chain, reusing the exact 1/2/3 convention the existing preset ThreeWaySwitch nodes
+    already use - so it drops straight into the nested switch subgraph's own `value` input unchanged.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {
+            "preset": (["Manual", "EXR", "PNG", "MP4"], {"default": "Manual",
+                       "tooltip": "Manual = act as a normal OCIO ColorSpace node using the widgts on this box. "
+                                  "EXR/PNG/MP4 = use that pre-built conversion recipe instead; the manual "
+                                  "widgets are then unused and shown greyed out."}),
+        }}
+
+    RETURN_TYPES = ("INT", "INT", "STRING")
+    RETURN_NAMES = ("outer_select", "inner_select", "preset")
+    OUTPUT_TOOLTIPS = ("1 = Manual, 2 = Preset chain - feeds the outer Manual-vs-Preset switches.",
+                       "1 = EXR, 2 = PNG, 3 = MP4 - feeds the inner preset-chain switches' `value` input.",
+                       "The active preset name, for reference only.")
+    FUNCTION = "run"
+    CATEGORY = "OCIO"
+
+    def run(self, preset="Manual"):
+        outer = 1 if preset == "Manual" else 2
+        inner = {"EXR": 1, "PNG": 2, "MP4": 3}.get(preset, 1)
+        return (outer, inner, preset)
+
+
 NODE_CLASS_MAPPINGS = {
     "OCIOColorSpace": OCIOColorSpace,
     "OCIOLogConvert": OCIOLogConvert,
@@ -1098,6 +1134,7 @@ NODE_CLASS_MAPPINGS = {
     "OCIOFileTransform": OCIOFileTransform,
     "OCIOLookTransform": OCIOLookTransform,
     "OCIOPresetControl": OCIOPresetControl,
+    "OCIOSwitchSelect": OCIOSwitchSelect,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -1108,4 +1145,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "OCIOFileTransform": "OCIO FileTransform",
     "OCIOLookTransform": "OCIO LookTransform",
     "OCIOPresetControl": "OCIO Preset Control",
+    "OCIOSwitchSelect": "OCIO Switch Select",
 }

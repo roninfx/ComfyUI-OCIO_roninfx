@@ -41,7 +41,12 @@ app.registerExtension({
                 // whole graph (all links vanished). Two guards: skip while app.configuringGraph is set, AND only ever
                 // disconnect on a GENUINE conflict (the OTHER input already connected) - a saved graph never has both
                 // (mutual exclusion prevents it), so a normal load triggers nothing here.
-                if (app.configuringGraph || this.__ocioDualBusy) return r;
+                // A THIRD guard: skip when this node has no live graph reference. ComfyUI's native
+                // convertToSubgraph fires onConnectionsChange while migrating a node between graphs, and at that
+                // moment this.graph can be transiently null/undefined - calling disconnectInput/disconnectOutput
+                // then throws deep inside LiteGraph ("Attempted to access LGraph reference that was null or
+                // undefined"), aborting the whole conversion. Nothing to reconcile here anyway with no graph.
+                if (app.configuringGraph || this.__ocioDualBusy || !this.graph) return r;
                 if (type === LG().INPUT && connected) {
                     const imgIn = inSlot(this, cfg.imgIn), vidIn = inSlot(this, cfg.vidIn);
                     const isC = (s) => s >= 0 && this.inputs[s] && this.inputs[s].link != null;
