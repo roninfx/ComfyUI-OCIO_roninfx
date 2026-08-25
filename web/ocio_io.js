@@ -611,11 +611,18 @@ const VIEW_NONE = "(none - raw)";
 function _viewParams(node) {
     const d = W(node, "view_display")?.value || "", v = W(node, "view_transform")?.value || "";
     if (!d || !v || d === VIEW_NONE || v === VIEW_NONE) return {};
-    return { vdisp: d, vview: v };
+    const out = { vdisp: d, vview: v };
+    // Optional source-colorspace override for the viewer LUT (mirrors OCIODisplay's in_colorspace +
+    // invert_direction). Absent unless the node HAS these widgets and one is set away from (none) - so a node
+    // without them (or left at default) keeps the old "src = this node's own output_colorspace, forward" behavior.
+    const cs = W(node, "colorspace_in")?.value || "";
+    if (cs && cs !== VIEW_NONE) out.vsrc = cs;
+    if (W(node, "invert_direction")?.value) out.vinvert = "1";
+    return out;
 }
 function _viewSig(node) {
     const p = _viewParams(node);
-    return (p.vdisp || "") + "|" + (p.vview || "");
+    return (p.vdisp || "") + "|" + (p.vview || "") + "|" + (p.vsrc || "") + "|" + (p.vinvert || "");
 }
 // The colour pair a preview is rendered THROUGH, which is not the same question for the two node kinds and was
 // the reason the flipbook could not simply be pointed at a Write.
@@ -2589,13 +2596,25 @@ app.registerExtension({
                     return Array.isArray(s?.[0]) ? s[0].slice() : [];
                 };
                 const _onViewChange = () => { try { updateReadPreview(self); } catch (e) {} };
+                // Optional source override for the display/view pair below (view-only, same as OCIODisplay's
+                // in_colorspace + invert_direction). Left at (none): the LUT source is this node's own
+                // output_colorspace, forward, exactly as before. Set both to relabel + invert the preview source
+                // before the display/view is applied - e.g. to match a hand-tuned OCIODisplay node's exact recipe.
+                // Ordered to match OCIODisplay's widget order (in_colorspace, display, view, invert_direction).
+                const _srcW = this.addWidget("combo", "colorspace_in", VIEW_NONE, _onViewChange,
+                    { values: [VIEW_NONE, ..._optsOf("OCIODisplay", "in_colorspace")], serialize: false,
+                      tooltip: "Override the SOURCE colorspace fed into the Viewer LUT below, for this node's preview ONLY. (none) = use this node's own output_colorspace." });
                 const _dispW = this.addWidget("combo", "view_display", VIEW_NONE, _onViewChange,
                     { values: [VIEW_NONE, ..._optsOf("OCIODisplay", "display")], serialize: false,
                       tooltip: "Viewer LUT display for this node's preview ONLY - does NOT change what the node outputs." });
                 const _viewW = this.addWidget("combo", "view_transform", VIEW_NONE, _onViewChange,
                     { values: [VIEW_NONE, ..._optsOf("OCIODisplay", "view")], serialize: false,
                       tooltip: "Viewer LUT view for this node's preview ONLY. Set both this and view_display to see it." });
-                _dispW._ocioAlwaysVisible = true; _viewW._ocioAlwaysVisible = true;
+                const _invW = this.addWidget("toggle", "invert_direction", false, _onViewChange,
+                    { serialize: false, on: "Inverse (display -> scene)", off: "Forward (scene -> display)",
+                      tooltip: "Invert the Viewer LUT (display-referred back to colorspace_in), for this node's preview ONLY." });
+                _srcW._ocioAlwaysVisible = true; _dispW._ocioAlwaysVisible = true;
+                _viewW._ocioAlwaysVisible = true; _invW._ocioAlwaysVisible = true;
                 ensureReadPreview(this);                                          // instant preview at the bottom
                 // Metadata: its OWN disclosure, below the viewer, built to match it - same chevron, down when
                 // open and right when closed. It used to fold away with the Viewer, which tied "I want to see

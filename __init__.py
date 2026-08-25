@@ -212,6 +212,10 @@ try:
         # LUT in the Viewer for exactly this reason. Sent by the front end from view-only widgets.
         vdisp = request.rel_url.query.get("vdisp", "")
         vview = request.rel_url.query.get("vview", "")
+        # Optional source override + direction for the viewer LUT (mirrors OCIODisplay's in_colorspace /
+        # invert_direction). Absent = old behavior: source is out_cs (or in_cs when raw), forward direction.
+        vsrc = request.rel_url.query.get("vsrc", "")
+        vinvert = request.rel_url.query.get("vinvert", "0") == "1"
         full = request.rel_url.query.get("full", "0") == "1"      # original mode: full-res (proxy = downscaled 512)
         max_side = 8192 if full else 512                          # thumb_frame never upscales, so 8192 = "as-is" up to 8K
         try:
@@ -239,7 +243,8 @@ try:
                     pass   # OCIO lib/config unavailable (_require_ocio) - pass the pixels through, same as raw=1
             if vdisp and vview:
                 from .io_nodes import _apply_view_lut
-                rgb = _apply_view_lut(rgb, (out_cs if (not raw and out_cs) else in_cs), vdisp, vview)
+                src_cs = vsrc or (out_cs if (not raw and out_cs) else in_cs)
+                rgb = _apply_view_lut(rgb, src_cs, vdisp, vview, invert=vinvert)
             png8 = (np.clip(rgb, 0.0, 1.0) * 255.0).astype(np.uint8)
             ok, buf = cv2.imencode(".png", png8[..., ::-1])   # RGB -> BGR for cv2
             if not ok:

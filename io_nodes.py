@@ -3173,9 +3173,9 @@ def _view_transform_input():
                             "Viewer LUT view for the on-node preview ONLY. Set both this and view_display to see it.")
 
 
-def _apply_view_lut(arr, src_cs, display, view):
-    """Viewer LUT for a PREVIEW frame: src_cs -> (display, view). Returns arr untouched if the pair is unset
-    or cannot be resolved, so a preview transform can never break a read or a write.
+def _apply_view_lut(arr, src_cs, display, view, invert=False):
+    """Viewer LUT for a PREVIEW frame: src_cs -> (display, view), or the inverse. Returns arr untouched if the
+    pair is unset or cannot be resolved, so a preview transform can never break a read or a write.
 
     The display/view may belong to ANY config in the input folder (an ACES 1.x config while the DEFAULT is
     ACES 2.0, say), so the owning config is SEARCHED for rather than assumed - otherwise the transform
@@ -3192,10 +3192,11 @@ def _apply_view_lut(arr, src_cs, display, view):
                 continue
             if display not in list(cfg.getDisplays()) or view not in list(cfg.getViews(display)):
                 continue
-            cpu = _cached_cpu_processor(
-                cfg_key, ("previewview", src_cs, display, view),
-                lambda c=cfg: c.getProcessor(
-                    OCIO.DisplayViewTransform(src=src_cs or "ACEScg", display=display, view=view)))
+            def build(c=cfg):
+                t = OCIO.DisplayViewTransform(src=src_cs or "ACEScg", display=display, view=view)
+                t.setDirection(OCIO.TRANSFORM_DIR_INVERSE if invert else OCIO.TRANSFORM_DIR_FORWARD)
+                return c.getProcessor(t)
+            cpu = _cached_cpu_processor(cfg_key, ("previewview", src_cs, display, view, invert), build)
             t = torch.from_numpy(np.ascontiguousarray(np.asarray(arr, np.float32)))[None]
             return _apply_processor(t, cpu)[0].numpy()
     except Exception:

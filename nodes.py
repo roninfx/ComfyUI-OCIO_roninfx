@@ -882,15 +882,49 @@ class OCIODisplay:
                       "label_on": "Inverse (display -> scene)", "label_off": "Forward (scene -> display)",
                       "tooltip": "Invert (display-referred back to the input colorspace)."}),
             "mix": _mix_input(),
-        }, "optional": {"image": ("IMAGE",), "video": ("VIDEO",), "config_path": _config_input()}}
+        }, "optional": {"image": ("IMAGE",), "video": ("VIDEO",), "config_path": _config_input(),
+                        # On-node preview, same pattern as OCIOColorSpace's (see its INPUT_TYPES for the full
+                        # rationale). No separate view_display/view_transform LUT here - this node's own
+                        # display+view (or its inverse) IS the transform, so the output is already what the
+                        # preview should show; a second LUT on top would be double-applying one.
+                        "preview": ("BOOLEAN", {"default": True,
+                                    "tooltip": "Render this node's on-node preview. OFF skips it entirely - no image encoded."}),
+                        "preview_frame": ("STRING", {"default": "0", "multiline": False,
+                                          "tooltip": "Which frame the on-node preview shows, as a 0-based index into the batch (0 = first). Clamped to the last frame if higher; blank or unreadable means 0."}),
+                        # Optional SECOND stage, chained after the display/view transform above: a plain
+                        # colorspace re-encode (e.g. ACEScg -> ACEScct). Lets one node do the whole
+                        # relabel + invert + working-space conversion that used to take 3 (an OCIOColorSpace
+                        # relabel, this node inverting, another OCIOColorSpace for the final space).
+                        # Sentinel default (PREVIEW_VIEW_NONE) = passthrough. APPENDED LAST, on purpose: a
+                        # widget inserted anywhere earlier shifts every widgets_values index after it in
+                        # already-saved graphs - this bit an OCIODisplay node in this exact workflow the first
+                        # time (preview's saved True landed in this slot as out_colorspace's value instead).
+                        "out_colorspace": _combo_or_string([PREVIEW_VIEW_NONE] + (_colorspace_names() or []),
+                                          PREVIEW_VIEW_NONE,
+                                          "Optional second stage: re-encode the display/view result into this colorspace (e.g. ACEScg -> ACEScct). (none) = skip, output stays in in_colorspace's space (or display-referred, if not inverted).")},
+                "hidden": {"unique_id": "UNIQUE_ID"}}
 
     RETURN_TYPES = ("IMAGE", "VIDEO")
     RETURN_NAMES = ("image/sequence/video", "ComfyUI Video")
     OUTPUT_TOOLTIPS = ("Image with the display + view transform applied (or inverted).",)
     FUNCTION = "run"
     CATEGORY = "OCIO"
+    # Required for the "▶ Run" button (ocio_io.js) to work: ComfyUI's validate_prompt only accepts a node
+    # into partial_execution_targets if its class has OUTPUT_NODE = True (execution.py) - without this the
+    # server finds zero valid outputs and silently rejects the whole queue request.
+    OUTPUT_NODE = True
 
-    def run(self, image=None, in_colorspace=None, display=None, view=None, invert_direction=False, mix=1.0, config_path=BUILTIN, video=None):
+    @classmethod
+    def IS_CHANGED(cls, **kwargs):
+        # Force re-execution on every "▶ Run" click, same input values or not. Without this, ComfyUI's own
+        # caching sees identical inputs to the last run and skips re-executing entirely - the queue call
+        # still succeeds, but no fresh onExecuted/preview arrives, which looks exactly like "nothing
+        # happened" from a manual Run click. This node's own transform is cheap (one frame, one color
+        # conversion), so always recomputing costs nothing worth caching against.
+        return float("nan")
+
+    def run(self, image=None, in_colorspace=None, display=None, view=None, invert_direction=False, mix=1.0,
+            config_path=BUILTIN, video=None, out_colorspace=None, preview=True, preview_frame="0", unique_id="0"):
         _require_ocio()
         cfg, cfg_key = _config_from_choice_keyed(config_path)
         if cfg is None:
@@ -903,7 +937,19 @@ class OCIODisplay:
             return cfg.getProcessor(t)
 
         cpu = _cached_cpu_processor(cfg_key, tf_key, build)
-        return _dual_io(lambda img: _blend(img, _apply_processor(img, cpu), mix), image, video)
+        out_img, out_vid = _dual_io(lambda img: _blend(img, _apply_processor(img, cpu), mix), image, video)
+        # Chained second stage: re-encode into out_colorspace. Only meaningful when inverted (the transform
+        # above lands back in in_colorspace's space); with a forward transform the image is display-referred,
+        # and OCIO will simply do whatever that colorspace pair actually means in the active config.
+        has_out_cs = out_colorspace and out_colorspace != PREVIEW_VIEW_NONE
+        if has_out_cs:
+            cs_key = ("colorspace", in_colorspace, out_colorspace)
+            cs_cpu = _cached_cpu_processor(cfg_key, cs_key, lambda: cfg.getProcessor(in_colorspace, out_colorspace))
+            out_img, out_vid = _dual_io(lambda img: _apply_processor(img, cs_cpu), out_img, out_vid)
+        show = True if preview is None else bool(preview)
+        ui = (_preview_ui(out_img, None, None, None, f"ocio_display_{unique_id}", preview_frame)
+              if show else None)
+        return {"ui": ui, "result": (out_img, out_vid)} if ui else (out_img, out_vid)
 
     @classmethod
     def VALIDATE_INPUTS(cls, display=None, view=None, config_path=None):
