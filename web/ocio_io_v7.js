@@ -2791,7 +2791,7 @@ app.registerExtension({
                 const a = W(this, "input_colorspace"), b = W(this, "output_colorspace");
                 if (!a || !b) return;
                 ctx.save();
-                ctx.font = "10px sans-serif"; ctx.fillStyle = "#9cf"; ctx.textAlign = "right";
+                ctx.font = "12px sans-serif"; ctx.fillStyle = "#9cf"; ctx.textAlign = "right";
                 // raw_data ON = the two combos are ignored and the pixels pass through untouched, so the
                 // honest label is "raw", not a conversion that is not happening (user-reported, 2026-08-25).
                 const rawW = W(this, "raw_data");
@@ -2979,8 +2979,8 @@ app.registerExtension({
                 const ext = isVideo ? (CODEC_INFO[W(this, "video_codec")?.value]?.ext || ".mp4").slice(1)
                                     : (STILL_EXT[W(this, "still_format")?.value] || "exr");
                 ctx.save();
-                ctx.font = "10px sans-serif"; ctx.fillStyle = "#9cf"; ctx.textAlign = "left";
-                ctx.fillText(`${ext.toUpperCase()}: ${shorten(a.value)} → ${shorten(b.value)}`, 8, -66);
+                ctx.font = "12px sans-serif"; ctx.fillStyle = "#9cf"; ctx.textAlign = "right";
+                ctx.fillText(`${ext.toUpperCase()}: ${shorten(a.value)} → ${shorten(b.value)}`, this.size[0] - 8, -66);
                 ctx.font = "9px sans-serif"; ctx.fillStyle = "#7a9"; ctx.textAlign = "left";
                 ctx.fillText("→ " + exampleName(this), 8, this.size[1] - 6);
                 if (W(this, "container")?.value === "video") {

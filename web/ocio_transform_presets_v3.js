@@ -163,7 +163,7 @@ function installChainLabel(node) {
             if (hasOut) parts.push(shortenCs(out));
         }
         ctx.save();
-        ctx.font = "10px sans-serif"; ctx.fillStyle = "#9cf"; ctx.textAlign = "right";
+        ctx.font = "12px sans-serif"; ctx.fillStyle = "#9cf"; ctx.textAlign = "right";
         // Above the CoSA banner (banner spans y -60..-30, title bar -30..0): stacked label / banner / title,
         // nothing overlapping. Bottom-of-node placement was tried on paper and rejected as too far from the eye.
         // Preset name leads the label (user request 2026-08-26), same "what next to how" pattern as the Read
