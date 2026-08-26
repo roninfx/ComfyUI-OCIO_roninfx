@@ -2584,7 +2584,10 @@ app.registerExtension({
                 // in place, which is what a local workflow wants (no duplicating big EXR sequences / video into
                 // the input folder). uploadRead() (copy-into-input) still exists if we ever want to re-expose it.
                 const browseBtn = this.addWidget("button", "Open Files", null,
-                    () => openBrowser(this, { widget: "source", pickFiles: true }), { serialize: false });
+                    // Any throw surfaces as an alert: a silently dead Open Files button is undebuggable for a
+                    // user without devtools (remote/Mac session, 2026-08-25) - fail loud, not dead.
+                    () => { try { openBrowser(this, { widget: "source", pickFiles: true }); }
+                            catch (e) { alert("Open Files error: " + ((e && e.stack) || e)); } }, { serialize: false });
                 browseBtn._ocioAlwaysVisible = true;
                 // The `source` STRING widget IS the editable path (type a file / sequence / video, or fill it via
                 // Open Files). Tooltip clarifies it is not a duplicate of the button. Added 2026-07-03.
