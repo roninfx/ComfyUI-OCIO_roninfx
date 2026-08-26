@@ -1216,7 +1216,14 @@ class CoSAOCIOOutputTransform(OCIODisplay):
     forward Rec.1886 ODT. Deliberately a SEPARATE class from the input node rather than a direction toggle:
     every preset/sensing behavior would otherwise need direction-conditional logic, and a silently wrong
     direction is exactly the trap class the presets exist to close. Preset values live in
-    ocio_outputtransform_preset JS; run() is the parent's math unchanged.
+    ocio_outputtransform_preset JS.
+
+    Own run() (does not delegate to OCIODisplay.run() like the input node does), for the preview-only viewer
+    LUT below: the EXR preset's real output is scene-linear ACEScg (correct for the file - a VFX-intermediate
+    EXR should be scene-referred), which looks broken viewed raw with no display curve (user-reported,
+    2026-08-26). PNG/MP4 presets already bake a forward display transform into their output, so a second LUT
+    there would double-apply - the guard below only engages the viewer LUT when out_colorspace re-encoded the
+    result (has_out_cs), which is exactly the "still scene-referred" case.
     """
 
     @classmethod
@@ -1228,15 +1235,44 @@ class CoSAOCIOOutputTransform(OCIODisplay):
                                      "CoSA Write's format when connected."})}
         req.update(base["required"])
         base["required"] = req
+        # Preview-only viewer LUT (2026-08-26, user-requested): defaults ON (Rec.1886 Rec.709 + ACES 1.0 SDR
+        # Video), unlike OCIOColorSpace's own version which defaults off - a scene-linear EXR preview needs a
+        # display curve to read as anything but broken, so the useful default here is "on", not "none".
+        # Appended LAST for the same positional reason as out_colorspace above.
+        vd_type, vd_cfg = _preview_view_display()
+        vv_type, vv_cfg = _preview_view_transform()
+        base["optional"]["view_display"] = (vd_type, {**vd_cfg, "default": "Rec.1886 Rec.709 - Display"})
+        base["optional"]["view_transform"] = (vv_type, {**vv_cfg, "default": "ACES 1.0 - SDR Video"})
         return base
 
     def run(self, image=None, preset=None, in_colorspace=None, display=None, view=None, invert_direction=False,
             mix=1.0, config_path=BUILTIN, video=None, out_colorspace=None, preview=True, preview_frame="0",
-            unique_id="0"):
-        return OCIODisplay.run(self, image=image, in_colorspace=in_colorspace, display=display, view=view,
-                               invert_direction=invert_direction, mix=mix, config_path=config_path, video=video,
-                               out_colorspace=out_colorspace, preview=preview, preview_frame=preview_frame,
-                               unique_id=unique_id)
+            view_display=None, view_transform=None, unique_id="0"):
+        _require_ocio()
+        cfg, cfg_key = _config_from_choice_keyed(config_path)
+        if cfg is None:
+            raise RuntimeError("No OCIO config found.")
+        tf_key = ("display", in_colorspace, display, view, invert_direction)
+
+        def build():
+            t = OCIO.DisplayViewTransform(src=in_colorspace, display=display, view=view)
+            t.setDirection(OCIO.TRANSFORM_DIR_INVERSE if invert_direction else OCIO.TRANSFORM_DIR_FORWARD)
+            return cfg.getProcessor(t)
+
+        cpu = _cached_cpu_processor(cfg_key, tf_key, build)
+        out_img, out_vid = _dual_io(lambda img_: _blend(img_, _apply_processor(img_, cpu), mix), image, video)
+        has_out_cs = out_colorspace and out_colorspace != PREVIEW_VIEW_NONE
+        if has_out_cs:
+            cs_key = ("colorspace", in_colorspace, out_colorspace)
+            cs_cpu = _cached_cpu_processor(cfg_key, cs_key, lambda: cfg.getProcessor(in_colorspace, out_colorspace))
+            out_img, out_vid = _dual_io(lambda img_: _apply_processor(img_, cs_cpu), out_img, out_vid)
+        show = True if preview is None else bool(preview)
+        src_cs = out_colorspace if has_out_cs else None
+        vd = view_display if has_out_cs else None
+        vv = view_transform if has_out_cs else None
+        ui = (_preview_ui(out_img, src_cs, vd, vv, f"ocio_display_{unique_id}", preview_frame)
+              if show else None)
+        return {"ui": ui, "result": (out_img, out_vid)} if ui else (out_img, out_vid)
 
 
 NODE_CLASS_MAPPINGS = {
