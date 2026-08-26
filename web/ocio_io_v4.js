@@ -2795,8 +2795,12 @@ app.registerExtension({
                 // raw_data ON = the two combos are ignored and the pixels pass through untouched, so the
                 // honest label is "raw", not a conversion that is not happening (user-reported, 2026-08-25).
                 const rawW = W(this, "raw_data");
-                ctx.fillText((rawW && rawW.value) ? "raw (no conversion)"
-                             : `${shorten(a.value)} → ${shorten(b.value)}`, this.size[0] - 8, -66);
+                // File type prefix (user request 2026-08-26): the loaded source's extension leads the label,
+                // so a Read announces WHAT it holds next to HOW it is converting it - "EXR · raw (no conversion)".
+                const _ext = (String(W(this, "source")?.value || "").toLowerCase().split(".").pop() || "");
+                const _tag = (_ext && _ext.length <= 4) ? (_ext.toUpperCase() + " · ") : "";
+                ctx.fillText(_tag + ((rawW && rawW.value) ? "raw (no conversion)"
+                             : `${shorten(a.value)} → ${shorten(b.value)}`), this.size[0] - 8, -66);
                 // Zoom-out fallback support: measure the viewport's TRUE node-local rect from the DOM while
                 // it is visible, and make sure the canvas-level draw hook is installed (the draw itself lives
                 // in _fbDrawAll - see its comment for why node-level drawing gets painted over).
