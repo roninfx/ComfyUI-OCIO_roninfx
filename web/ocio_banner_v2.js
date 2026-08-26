@@ -13,7 +13,8 @@ BANNER_IMG.src = new URL("cosa_banner.png", import.meta.url).href;
 app.registerExtension({
     name: "ComfyUI-OCIO.read_banner",
     async nodeCreated(node) {
-        if (node?.comfyClass !== "OCIORead" && node?.type !== "OCIORead") return;
+        const _t = node?.comfyClass || node?.type;
+        if (_t !== "OCIORead" && _t !== "OCIOWrite") return;
         if (node.__cosaBannerAdded) return;
         node.__cosaBannerAdded = true;
         const orig = node.onDrawForeground;

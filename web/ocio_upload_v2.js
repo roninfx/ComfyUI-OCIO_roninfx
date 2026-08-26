@@ -7,6 +7,7 @@ const UPLOAD = {
     OCIOColorSpace:    { widget: "config_path", accept: ".ocio", label: "upload .ocio config" },
     OCIODisplay:       { widget: "config_path", accept: ".ocio", label: "upload .ocio config" },
     CoSAOCIOSourceTransform:      { widget: "config_path", accept: ".ocio", label: "upload .ocio config" },
+    CoSAOCIOOutputTransform: { widget: "config_path", accept: ".ocio", label: "upload .ocio config" },
     OCIOLookTransform: { widget: "config_path", accept: ".ocio", label: "upload .ocio config" },
     OCIOFileTransform: { widget: "file_path",
                          accept: ".cube,.3dl,.spi1d,.spi3d,.csp,.ccc,.cdl,.clf,.lut",

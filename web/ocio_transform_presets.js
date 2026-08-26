@@ -24,6 +24,54 @@ const PRESETS = {
 };
 const DRIVEN = ["in_colorspace", "display", "view", "invert_direction"];
 
+// OUTPUT recipes (CoSA OCIO Output Transform): the pipeline run FORWARD out of ACEScct. EXR keeps the data
+// scene-referred (Raw view + ACEScct->ACEScg re-encode); PNG/MP4 bake the forward ODT. Unlike the input node,
+// out_colorspace IS preset-driven here - the EXR delivery IS that re-encode, and PNG/MP4 must clear it.
+const OUT_PRESETS = {
+    EXR: { in_colorspace: "ACEScct", display: "Rec.1886 Rec.709 - Display", view: "Raw",
+           invert_direction: false, out_colorspace: "ACEScg" },
+    PNG: { in_colorspace: "ACEScct", display: "sRGB - Display", view: "ACES 1.0 - SDR Video",
+           invert_direction: false, out_colorspace: "(none - raw)" },
+    MP4: { in_colorspace: "ACEScct", display: "Rec.1886 Rec.709 - Display", view: "ACES 1.0 - SDR Video",
+           invert_direction: false, out_colorspace: "(none - raw)" },
+};
+const isOutputTransform = (n) => (n && (n.comfyClass === "CoSAOCIOOutputTransform" || n.type === "CoSAOCIOOutputTransform"));
+const tableOf = (n) => (isOutputTransform(n) ? OUT_PRESETS : PRESETS);
+const drivenOf = (n) => (isOutputTransform(n) ? [...DRIVEN, "out_colorspace"] : DRIVEN);
+// Downstream CoSA Write's chosen format -> preset name (video container = MP4; stills by still_format).
+function writePresetOf(writeNode) {
+    const c = W(writeNode, "container")?.value;
+    if (c === "video") return "MP4";
+    const f = String(W(writeNode, "still_format")?.value || "").toLowerCase();
+    if (f === "exr") return "EXR";
+    if (["png", "jpg", "jpeg", "tif", "tiff"].includes(f)) return "PNG";
+    return null;
+}
+function senseFromWrite(otNode, writeNode, { overrideManual }) {
+    const preset = W(otNode, "preset");
+    if (!preset) return;
+    if (preset.value === "Manual" && !overrideManual) return;
+    const wanted = writePresetOf(writeNode);
+    if (!wanted || preset.value === wanted) return;
+    preset.value = wanted;
+    applyPreset(otNode, wanted);
+}
+// A Write's format changed: re-sense every Output Transform wired into it (tracking presets only - Manual
+// stays parked, same contract as the Read-side file swap).
+window.addEventListener("cosa:write-format-changed", (ev) => {
+    try {
+        const g = app.graph;
+        const wr = g && g.getNodeById(ev.detail && ev.detail.nodeId);
+        if (!wr) return;
+        for (const inp of wr.inputs || []) {
+            if (inp.link == null) continue;
+            const link = g.links[inp.link];
+            const origin = link && g.getNodeById(link.origin_id);
+            if (origin && isOutputTransform(origin)) senseFromWrite(origin, wr, { overrideManual: false });
+        }
+    } catch (e) { /* re-sensing must never break the app */ }
+});
+
 // File extension -> preset, shared by connect-time sensing and file-swap re-sensing.
 function extPreset(ext) {
     if (["exr", "hdr"].includes(ext)) return "EXR";
@@ -64,11 +112,11 @@ window.addEventListener("cosa:read-source-changed", (ev) => {
 const W = (node, name) => (node.widgets || []).find((w) => w.name === name);
 
 function applyPreset(node, name) {
-    const vals = PRESETS[name];
+    const vals = tableOf(node)[name];
     if (!vals) return;                          // Manual (or unknown): hands off
     node.__cosaApplying = true;                 // guard: our own writes must not bounce preset back to Manual
     try {
-        for (const key of DRIVEN) {
+        for (const key of Object.keys(vals)) {
             const w = W(node, key);
             if (!w) continue;
             if (w.value === vals[key]) continue;
@@ -127,7 +175,8 @@ function installChainLabel(node) {
 app.registerExtension({
     name: "ComfyUI-OCIO.display2preset",
     async nodeCreated(node) {
-        if (node?.comfyClass !== "CoSAOCIOSourceTransform" && node?.type !== "CoSAOCIOSourceTransform") return;
+        const _cls = node?.comfyClass || node?.type;
+        if (_cls !== "CoSAOCIOSourceTransform" && _cls !== "CoSAOCIOOutputTransform") return;
         const preset = W(node, "preset");
         if (!preset || preset.__cosaPresetWired) return;
         preset.__cosaPresetWired = true;
@@ -153,20 +202,26 @@ app.registerExtension({
             const r = prevConn ? prevConn.apply(this, arguments) : undefined;
             try {
                 if (app.configuringGraph) return r;
-                if (!connected || type !== 1) return r;                      // 1 = INPUT
-                const name = ioSlot && ioSlot.name;
-                if (name !== "image" && name !== "video") return r;
-                const link = linkInfo || (this.graph && this.graph.links && this.graph.links[ioSlot.link]);
-                const origin = link && this.graph && this.graph.getNodeById(link.origin_id);
-                if (!origin || origin.type !== "OCIORead") return r;
-                senseFromRead(node, origin, { overrideManual: true });   // fresh wiring overrides even Manual
+                if (!connected) return r;
+                if (type === 1 && !isOutputTransform(node)) {                // INPUT side: Read -> Input Transform
+                    const name = ioSlot && ioSlot.name;
+                    if (name !== "image" && name !== "video") return r;
+                    const link = linkInfo || (this.graph && this.graph.links && this.graph.links[ioSlot.link]);
+                    const origin = link && this.graph && this.graph.getNodeById(link.origin_id);
+                    if (!origin || origin.type !== "OCIORead") return r;
+                    senseFromRead(node, origin, { overrideManual: true });   // fresh wiring overrides even Manual
+                } else if (type === 2 && isOutputTransform(node)) {          // OUTPUT side: Output Transform -> Write
+                    const target = linkInfo && this.graph && this.graph.getNodeById(linkInfo.target_id);
+                    if (!target || (target.comfyClass !== "OCIOWrite" && target.type !== "OCIOWrite")) return r;
+                    senseFromWrite(node, target, { overrideManual: true });  // fresh wiring overrides even Manual
+                }
             } catch (e) { /* sensing must never break wiring */ }
             return r;
         };
 
         // Hand-editing a driven widget -> flip preset back to Manual (only when WE are not the writer).
         // Deliberately NOT applied on workflow load (loads restore saved values without callbacks firing).
-        for (const key of DRIVEN) {
+        for (const key of drivenOf(node)) {
             const w = W(node, key);
             if (!w || w.__cosaManualWired) continue;
             w.__cosaManualWired = true;

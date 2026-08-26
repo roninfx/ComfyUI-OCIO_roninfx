@@ -2214,7 +2214,7 @@ function playerVideoStart(node, p, path, meta) {
 // these sits between a video source and the Player, streaming the raw source file would silently BYPASS its color
 // transform - the Player would show the untouched video, ignoring the intermediate node. So when one is crossed, the
 // trace returns null and the caller falls through to a normal render of the PROCESSED (materialized, capped) batch.
-const OCIO_PROC_TYPES = new Set(["OCIOLogConvert", "OCIOColorSpace", "OCIODisplay", "CoSAOCIOSourceTransform", "OCIOCDLTransform",
+const OCIO_PROC_TYPES = new Set(["OCIOLogConvert", "OCIOColorSpace", "OCIODisplay", "CoSAOCIOSourceTransform", "CoSAOCIOOutputTransform", "OCIOCDLTransform",
     "OCIOFileTransform", "OCIOLookTransform", "OCIOGrade", "OCIOGradeMatch", "OCIOApplyGrade"]);
 function _playerTraceVideoSrc(node, seen, crossedProc) {
     try {
@@ -2549,7 +2549,7 @@ function _fbDrawAll(canvas, ctx) {
     if (!lowQ) return;
     for (const node of canvas.graph._nodes || []) {
         try {
-            if (node.type !== "OCIORead" || (node.flags && node.flags.collapsed)) continue;
+            if ((node.type !== "OCIORead" && node.type !== "OCIOWrite") || (node.flags && node.flags.collapsed)) continue;
             const p = node._ocioPrev;
             const wdg = (node.widgets || []).find((w) => w.name === "preview");
             if (!p || !wdg || wdg.y == null || node._ocioReadCollapsed) continue;
@@ -2899,12 +2899,14 @@ app.registerExtension({
                 onChange(this, "container", () => {
                     applyContainer();
                     setW(node, "output_colorspace", autoOutCs(W(node, "container")?.value, W(node, "still_format")?.value));
+                    try { window.dispatchEvent(new CustomEvent("cosa:write-format-changed", { detail: { nodeId: node.id } })); } catch (e) {}
                 });
                 onChange(this, "still_format", () => {
                     applyFormat();
                     applyCompressionVis();
                     setW(node, "output_colorspace", autoOutCs(W(node, "container")?.value, W(node, "still_format")?.value));
                     pokeWidgets(node);
+                    try { window.dispatchEvent(new CustomEvent("cosa:write-format-changed", { detail: { nodeId: node.id } })); } catch (e) {}
                 });
                 onChange(this, "video_codec", () => { applyCodecLabel(); pokeWidgets(node); node.setDirtyCanvas(true, true); });
                 // auto frame range / fps from the upstream OCIO Read
@@ -2973,7 +2975,7 @@ app.registerExtension({
                 const fmt = (W(this, "container")?.value === "video") ? W(this, "video_codec")?.value : W(this, "still_format")?.value;
                 ctx.save();
                 ctx.font = "10px sans-serif"; ctx.fillStyle = "#9cf"; ctx.textAlign = "right";
-                ctx.fillText(`${shorten(a.value)} → ${shorten(b.value)}  [${fmt}]`, this.size[0] - 8, -6);
+                ctx.fillText(`${shorten(a.value)} → ${shorten(b.value)}  [${fmt}]`, this.size[0] - 8, -66);
                 ctx.font = "9px sans-serif"; ctx.fillStyle = "#7a9"; ctx.textAlign = "left";
                 ctx.fillText("→ " + exampleName(this), 8, this.size[1] - 6);
                 if (W(this, "container")?.value === "video") {

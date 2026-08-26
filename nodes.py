@@ -1207,11 +1207,44 @@ class CoSAOCIOSourceTransform(OCIODisplay):
                                unique_id=unique_id)
 
 
+
+class CoSAOCIOOutputTransform(OCIODisplay):
+    """CoSA OCIO Output Transform - the OUTBOUND mirror of CoSA OCIO Input Transform (CoSAOCIOSourceTransform).
+
+    Same preset combo (Manual/EXR/PNG/MP4), but the recipes run the pipeline FORWARD out of the working
+    space: EXR = ACEScct -> ACEScg re-encode (view Raw), PNG = ACEScct -> forward sRGB ODT, MP4 = ACEScct ->
+    forward Rec.1886 ODT. Deliberately a SEPARATE class from the input node rather than a direction toggle:
+    every preset/sensing behavior would otherwise need direction-conditional logic, and a silently wrong
+    direction is exactly the trap class the presets exist to close. Preset values live in
+    ocio_outputtransform_preset JS; run() is the parent's math unchanged.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        base = OCIODisplay.INPUT_TYPES()
+        req = {"preset": (["Manual", "EXR", "PNG", "MP4"], {"default": "Manual",
+                          "tooltip": "Delivery preset: sets in_colorspace/display/view/invert_direction only. "
+                                     "Everything else is never touched. Manual = hands off. Senses the DOWNSTREAM "
+                                     "CoSA Write's format when connected."})}
+        req.update(base["required"])
+        base["required"] = req
+        return base
+
+    def run(self, image=None, preset=None, in_colorspace=None, display=None, view=None, invert_direction=False,
+            mix=1.0, config_path=BUILTIN, video=None, out_colorspace=None, preview=True, preview_frame="0",
+            unique_id="0"):
+        return OCIODisplay.run(self, image=image, in_colorspace=in_colorspace, display=display, view=view,
+                               invert_direction=invert_direction, mix=mix, config_path=config_path, video=video,
+                               out_colorspace=out_colorspace, preview=preview, preview_frame=preview_frame,
+                               unique_id=unique_id)
+
+
 NODE_CLASS_MAPPINGS = {
     "OCIOColorSpace": OCIOColorSpace,
     "OCIOLogConvert": OCIOLogConvert,
     "OCIODisplay": OCIODisplay,
     "CoSAOCIOSourceTransform": CoSAOCIOSourceTransform,
+    "CoSAOCIOOutputTransform": CoSAOCIOOutputTransform,
     "OCIOCDLTransform": OCIOCDLTransform,
     "OCIOFileTransform": OCIOFileTransform,
     "OCIOLookTransform": OCIOLookTransform,
@@ -1223,7 +1256,8 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "OCIOColorSpace": "OCIO ColorSpace",
     "OCIOLogConvert": "OCIO LogConvert",
     "OCIODisplay": "OCIO Display",
-    "CoSAOCIOSourceTransform": "CoSA OCIO Source Transform",
+    "CoSAOCIOSourceTransform": "CoSA OCIO Input Transform",
+    "CoSAOCIOOutputTransform": "CoSA OCIO Output Transform",
     "OCIOCDLTransform": "OCIO CDLTransform",
     "OCIOFileTransform": "OCIO FileTransform",
     "OCIOLookTransform": "OCIO LookTransform",

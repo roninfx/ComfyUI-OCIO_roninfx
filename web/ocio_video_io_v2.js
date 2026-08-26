@@ -14,6 +14,7 @@ const DUAL = {
     OCIOLogConvert:    { imgIn: "image", vidIn: "video", imgOut: 0, vidOut: 1 },
     OCIODisplay:       { imgIn: "image", vidIn: "video", imgOut: 0, vidOut: 1 },
     CoSAOCIOSourceTransform:      { imgIn: "image", vidIn: "video", imgOut: 0, vidOut: 1 },
+    CoSAOCIOOutputTransform: { imgIn: "image", vidIn: "video", imgOut: 0, vidOut: 1 },
     OCIOCDLTransform:  { imgIn: "image", vidIn: "video", imgOut: 0, vidOut: 1 },
     OCIOFileTransform: { imgIn: "image", vidIn: "video", imgOut: 0, vidOut: 1 },
     OCIOLookTransform: { imgIn: "image", vidIn: "video", imgOut: 0, vidOut: 1 },
