@@ -2517,6 +2517,71 @@ async function ocioWriteRender(node) {
     const w = W(node, "render_nonce"); if (w) w.value = String(Date.now());   // bump -> ComfyUI cache miss -> re-writes even to the same path
     app.queuePrompt(0, 1);
 }
+// ---- Zoom-out viewport fallback (2026-08-26). ComfyUI hides every addDOMWidget element below the
+// low-quality zoom threshold and paints a gray placeholder rect in the WIDGET draw pass - which runs AFTER
+// node.onDrawForeground, so a fallback drawn there gets painted over (bug: image visible only in the sliver
+// where placeholder and viewport rects disagreed). This hook rides LGraphCanvas.onDrawForeground instead,
+// which runs after ALL nodes and widgets: nothing on the canvas can cover it. The viewport rect is measured
+// from the real DOM (getBoundingClientRect inverted through ds) while the box is visible, because the DOM
+// widget's last_y/y lies on this frontend (reported 572 for a box whose true top was ~380).
+function _fbDrawAll(canvas, ctx) {
+    if (!canvas || !canvas.graph) return;
+    const lowQ = !!(canvas.low_quality || (canvas.ds && canvas.ds.scale < 0.6));
+    if (!lowQ) return;
+    for (const node of canvas.graph._nodes || []) {
+        try {
+            if (node.type !== "OCIORead" || (node.flags && node.flags.collapsed)) continue;
+            const p = node._ocioPrev;
+            const wdg = (node.widgets || []).find((w) => w.name === "preview");
+            if (!p || !wdg || wdg.y == null || node._ocioReadCollapsed) continue;
+            const vis = (el) => el && el.style.display !== "none";
+            const cand = (el, w2, h2, shown) => (el && w2 > 0 && h2 > 0) ? { el, w2, h2, shown } : null;
+            const all = [
+                cand(p.img, p.img.naturalWidth, p.img.naturalHeight, vis(p.img)),
+                cand(p.canvas, p.canvas.width, p.canvas.height, vis(p.canvas)),
+                cand(p.video, p.video.videoWidth, p.video.videoHeight, vis(p.video)),
+            ].filter(Boolean);
+            const srcEl = all.find((c) => c.shown) || all[0];
+            if (!srcEl) continue;
+            // EXACTLY the rect the frontend positions the DOM widget with (GraphView updateWidgets):
+            // pos = node.pos + margin (+ widget.y), size = (width ?? node width) - margin*2 by computedHeight - margin*2.
+            const m = (wdg.margin != null) ? wdg.margin : 10;
+            const bx = node.pos[0] + m, by = node.pos[1] + m + wdg.y;
+            const bw = ((wdg.width != null ? wdg.width : node.size[0]) - m * 2);
+            const bh = ((wdg.computedHeight != null ? wdg.computedHeight : 50) - m * 2);
+            if (!(bw > 8 && bh > 8)) continue;
+            ctx.save();
+            ctx.fillStyle = "#111";
+            ctx.fillRect(bx, by, bw, bh);
+            const loadingImg = (srcEl.el === p.img) && !srcEl.el.complete;
+            if (loadingImg) {
+                if (!p.__fbWait) {
+                    p.__fbWait = true;
+                    const done = () => { p.__fbWait = false; node.setDirtyCanvas(true, true); };
+                    srcEl.el.addEventListener("load", done, { once: true });
+                    srcEl.el.addEventListener("error", done, { once: true });
+                }
+            } else {
+                const s = Math.min(bw / srcEl.w2, bh / srcEl.h2);
+                const dw = srcEl.w2 * s, dh = srcEl.h2 * s;
+                ctx.drawImage(srcEl.el, bx + (bw - dw) / 2, by + (bh - dh) / 2, dw, dh);
+            }
+            ctx.restore();
+        } catch (e) { /* one bad node must not break the pass */ }
+    }
+}
+function _fbEnsureHook() {
+    const c = app.canvas;
+    if (!c || c.__ocioFbHooked) return;
+    c.__ocioFbHooked = true;
+    const orig = c.onDrawForeground;
+    c.onDrawForeground = function (ctx, area) {
+        const r = orig ? orig.apply(this, arguments) : undefined;
+        try { _fbDrawAll(this, ctx); } catch (e) {}
+        return r;
+    };
+}
+
 app.registerExtension({
     name: "ComfyUI-OCIO.io",
     async setup() {
@@ -2715,6 +2780,25 @@ app.registerExtension({
                 const rawW = W(this, "raw_data");
                 ctx.fillText((rawW && rawW.value) ? "raw (no conversion)"
                              : `${shorten(a.value)} → ${shorten(b.value)}`, this.size[0] - 8, -66);
+                // Zoom-out fallback support: measure the viewport's TRUE node-local rect from the DOM while
+                // it is visible, and make sure the canvas-level draw hook is installed (the draw itself lives
+                // in _fbDrawAll - see its comment for why node-level drawing gets painted over).
+                try {
+                    _fbEnsureHook();
+                    const p = this._ocioPrev, cvs = app.canvas;
+                    const lowQ = !!(cvs && (cvs.low_quality || (cvs.ds && cvs.ds.scale < 0.6)));
+                    if (!lowQ && p && p.box && p.box.offsetParent && cvs && cvs.ds && cvs.canvas) {
+                        const r = p.box.getBoundingClientRect(), cr = cvs.canvas.getBoundingClientRect();
+                        const sc = cvs.ds.scale || 1;
+                        if (r.height > 4 && sc > 0) {
+                            p._fbRect = {
+                                x: (r.left - cr.left) / sc - cvs.ds.offset[0] - this.pos[0],
+                                y: (r.top - cr.top) / sc - cvs.ds.offset[1] - this.pos[1],
+                                w: r.width / sc, h: r.height / sc,
+                            };
+                        }
+                    }
+                } catch (e) { /* never break node drawing */ }
                 const seq = this._ocioSeq;
                 if (seq && seq.kind === "sequence") {
                     ctx.textAlign = "left"; ctx.font = "9px sans-serif";
