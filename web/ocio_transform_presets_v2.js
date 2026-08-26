@@ -166,7 +166,12 @@ function installChainLabel(node) {
         ctx.font = "10px sans-serif"; ctx.fillStyle = "#9cf"; ctx.textAlign = "right";
         // Above the CoSA banner (banner spans y -60..-30, title bar -30..0): stacked label / banner / title,
         // nothing overlapping. Bottom-of-node placement was tried on paper and rejected as too far from the eye.
-        ctx.fillText(parts.join(" → "), this.size[0] - 8, -66);
+        // Preset name leads the label (user request 2026-08-26), same "what next to how" pattern as the Read
+        // node's file-type prefix - Manual is worth naming too, since it is the one state where the four
+        // driven fields could say ANYTHING and the label alone would not explain why.
+        const presetVal = val("preset");
+        const tag = presetVal ? `${presetVal}: ` : "";
+        ctx.fillText(tag + parts.join(" → "), this.size[0] - 8, -66);
         ctx.restore();
         return r;
     };

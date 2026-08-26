@@ -2972,10 +2972,15 @@ app.registerExtension({
                 if (this.flags && this.flags.collapsed) return;
                 const a = W(this, "from_colorspace"), b = W(this, "output_colorspace");
                 if (!a || !b) return;
-                const fmt = (W(this, "container")?.value === "video") ? W(this, "video_codec")?.value : W(this, "still_format")?.value;
+                // File-type prefix (user request 2026-08-26, moved to the LEFT + "EXR: " style to match the
+                // Read node's own prefix and the Transform nodes' preset-name prefix): the true output
+                // EXTENSION, not the raw codec/format widget value ("h264" -> MP4, "prores_4444" -> MOV).
+                const isVideo = W(this, "container")?.value === "video";
+                const ext = isVideo ? (CODEC_INFO[W(this, "video_codec")?.value]?.ext || ".mp4").slice(1)
+                                    : (STILL_EXT[W(this, "still_format")?.value] || "exr");
                 ctx.save();
-                ctx.font = "10px sans-serif"; ctx.fillStyle = "#9cf"; ctx.textAlign = "right";
-                ctx.fillText(`${shorten(a.value)} → ${shorten(b.value)}  [${fmt}]`, this.size[0] - 8, -66);
+                ctx.font = "10px sans-serif"; ctx.fillStyle = "#9cf"; ctx.textAlign = "left";
+                ctx.fillText(`${ext.toUpperCase()}: ${shorten(a.value)} → ${shorten(b.value)}`, 8, -66);
                 ctx.font = "9px sans-serif"; ctx.fillStyle = "#7a9"; ctx.textAlign = "left";
                 ctx.fillText("→ " + exampleName(this), 8, this.size[1] - 6);
                 if (W(this, "container")?.value === "video") {
