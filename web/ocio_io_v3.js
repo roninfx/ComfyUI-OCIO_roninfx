@@ -2735,7 +2735,12 @@ app.registerExtension({
                 metaToggle._ocioAlwaysVisible = true;
                 ensureReadMeta(this);                                             // the panel itself, under its button
                 this._ocioAllWidgets = this.widgets.slice();                      // full ordered list, captured once
-                onChange(this, "source", (v) => { setW(this, "input_colorspace", autoInCs(v)); fillRange(this, v); updateReadMeta(this); });   // fillRange calls updateReadPreview once _ocioSeq is known; recipe-based viewer follow lives in fillRange
+                onChange(this, "source", (v) => {
+                    setW(this, "input_colorspace", autoInCs(v)); fillRange(this, v); updateReadMeta(this);   // fillRange calls updateReadPreview once _ocioSeq is known; recipe-based viewer follow lives in fillRange
+                    // Announce the swap so downstream Source Transforms can re-sense their preset (handled in
+                    // the preset extension; a CustomEvent keeps the two modules decoupled).
+                    try { window.dispatchEvent(new CustomEvent("cosa:read-source-changed", { detail: { nodeId: this.id } })); } catch (e) {}
+                });
                 for (const w of ["input_colorspace", "output_colorspace", "raw_data"]) {
                     onChange(this, w, () => updateReadPreview(this));  // colorspace change -> re-render the thumb
                 }

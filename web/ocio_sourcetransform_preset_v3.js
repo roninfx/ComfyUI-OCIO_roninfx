@@ -24,6 +24,43 @@ const PRESETS = {
 };
 const DRIVEN = ["in_colorspace", "display", "view", "invert_direction"];
 
+// File extension -> preset, shared by connect-time sensing and file-swap re-sensing.
+function extPreset(ext) {
+    if (["exr", "hdr"].includes(ext)) return "EXR";
+    if (["png", "jpg", "jpeg", "tif", "tiff"].includes(ext)) return "PNG";
+    if (["mp4", "mov", "mkv", "avi", "webm", "m4v", "mxf"].includes(ext)) return "MP4";
+    return null;
+}
+function senseFromRead(stNode, readNode, { overrideManual }) {
+    const preset = W(stNode, "preset");
+    if (!preset) return;
+    if (preset.value === "Manual" && !overrideManual) return;   // parked on Manual = hands off (file swaps only)
+    const srcVal = String(W(readNode, "source")?.value || "");
+    const wanted = extPreset(srcVal.toLowerCase().split(".").pop() || "");
+    if (!wanted || preset.value === wanted) return;
+    preset.value = wanted;
+    applyPreset(stNode, wanted);
+}
+// FILE-SWAP RE-SENSING (2026-08-26): a Read announces source changes; every Source Transform connected to
+// its outputs re-senses - but ONLY while the preset is tracking (EXR/PNG/MP4). A preset parked on Manual
+// stays parked; a fresh CONNECTION is the only thing that overrides Manual (user-specified contract).
+window.addEventListener("cosa:read-source-changed", (ev) => {
+    try {
+        const g = app.graph;
+        const read = g && g.getNodeById(ev.detail && ev.detail.nodeId);
+        if (!read) return;
+        for (const out of read.outputs || []) {
+            for (const linkId of out.links || []) {
+                const link = g.links[linkId];
+                const target = link && g.getNodeById(link.target_id);
+                if (target && (target.comfyClass === "CoSAOCIOSourceTransform" || target.type === "CoSAOCIOSourceTransform")) {
+                    senseFromRead(target, read, { overrideManual: false });
+                }
+            }
+        }
+    } catch (e) { /* re-sensing must never break the app */ }
+});
+
 const W = (node, name) => (node.widgets || []).find((w) => w.name === name);
 
 function applyPreset(node, name) {
@@ -111,12 +148,6 @@ app.registerExtension({
         // the user can flip back to Manual and it sticks until the next reconnection. Skipped during
         // workflow load (app.configuringGraph), where LiteGraph replays connections and sensing would stomp
         // every saved preset choice.
-        const EXT_PRESET = (ext) => {
-            if (["exr", "hdr"].includes(ext)) return "EXR";
-            if (["png", "jpg", "jpeg", "tif", "tiff"].includes(ext)) return "PNG";
-            if (["mp4", "mov", "mkv", "avi", "webm", "m4v", "mxf"].includes(ext)) return "MP4";
-            return null;
-        };
         const prevConn = node.onConnectionsChange;
         node.onConnectionsChange = function (type, slotIndex, connected, linkInfo, ioSlot) {
             const r = prevConn ? prevConn.apply(this, arguments) : undefined;
@@ -128,12 +159,7 @@ app.registerExtension({
                 const link = linkInfo || (this.graph && this.graph.links && this.graph.links[ioSlot.link]);
                 const origin = link && this.graph && this.graph.getNodeById(link.origin_id);
                 if (!origin || origin.type !== "OCIORead") return r;
-                const srcVal = String(W(origin, "source")?.value || "");
-                const ext = (srcVal.toLowerCase().split(".").pop() || "");
-                const wanted = EXT_PRESET(ext);
-                if (!wanted || preset.value === wanted) return r;
-                preset.value = wanted;
-                applyPreset(node, wanted);
+                senseFromRead(node, origin, { overrideManual: true });   // fresh wiring overrides even Manual
             } catch (e) { /* sensing must never break wiring */ }
             return r;
         };
