@@ -1129,6 +1129,10 @@ async function fillRange(node, source, opts) {
     // Everything the artist edits from here on is remembered by name, so a slow scan (big sequence, network
     // share) that lands later overwrites only the fields nobody touched, instead of losing the edit - or,
     // worse, dropping the whole answer and leaving the node holding values from the PREVIOUS clip.
+    // Pre-detect input colorspace, for the viewer auto-follow below: colorspace_in only follows the newly
+    // detected colorspace when it was MIRRORING the previous one (user pointed the viewer at the file's own
+    // space). A deliberately different viewer source is never touched.
+    const prevInCs = W(node, "input_colorspace")?.value || "";
     if (applyValues) node._ocioEdited = new Set();
     try {
         const r = await fetch("/ocio/seq_range", {
@@ -1159,6 +1163,18 @@ async function fillRange(node, source, opts) {
             // and correctly dynamic; a real re-base is still exactly one field edit away, same as before.
             if (d.fps) put("fps", Math.round(d.fps * 1000) / 1000);
             if (d.input_cs) put("input_colorspace", d.input_cs);   // folder path has no ext -> fix EXR auto-detect (sRGB -> ACEScg) from the resolved first frame
+            // Viewer auto-follow (2026-08-25): a duplicated EXR Read pointed at a PNG/MP4 kept its viewer-LUT
+            // source override (colorspace_in) on the OLD file's space, so the preview showed the new file through
+            // the wrong LUT with no hint. When the override was mirroring input_colorspace, keep it mirroring.
+            if (d.input_cs) {
+                const csw = W(node, "colorspace_in");
+                const mirrored = (csw && csw.value === prevInCs) || node.__ocioViewerMirrored;
+                node.__ocioViewerMirrored = false;
+                if (applyValues && csw && csw.value && csw.value !== VIEW_NONE && mirrored
+                    && !(node._ocioEdited && node._ocioEdited.has("colorspace_in"))) {
+                    setWSilent(node, "colorspace_in", d.input_cs);
+                }
+            }
             // the transport ruler + in/out span the REAL file frame count (authoritative), not video.duration
             if (pv && pv.pb) pv.pb.fileFrames = Math.max(1, (d.count | 0) || ((d.end | 0) - (d.start | 0) + 1) || 1);
         } else {
@@ -2179,7 +2195,7 @@ function playerVideoStart(node, p, path, meta) {
 // these sits between a video source and the Player, streaming the raw source file would silently BYPASS its color
 // transform - the Player would show the untouched video, ignoring the intermediate node. So when one is crossed, the
 // trace returns null and the caller falls through to a normal render of the PROCESSED (materialized, capped) batch.
-const OCIO_PROC_TYPES = new Set(["OCIOLogConvert", "OCIOColorSpace", "OCIODisplay", "OCIOCDLTransform",
+const OCIO_PROC_TYPES = new Set(["OCIOLogConvert", "OCIOColorSpace", "OCIODisplay", "CoSAOCIOSourceTransform", "OCIOCDLTransform",
     "OCIOFileTransform", "OCIOLookTransform", "OCIOGrade", "OCIOGradeMatch", "OCIOApplyGrade"]);
 function _playerTraceVideoSrc(node, seen, crossedProc) {
     try {
@@ -2632,7 +2648,14 @@ app.registerExtension({
                 metaToggle._ocioAlwaysVisible = true;
                 ensureReadMeta(this);                                             // the panel itself, under its button
                 this._ocioAllWidgets = this.widgets.slice();                      // full ordered list, captured once
-                onChange(this, "source", (v) => { setW(this, "input_colorspace", autoInCs(v)); fillRange(this, v); updateReadMeta(this); });   // fillRange calls updateReadPreview once _ocioSeq is known
+                onChange(this, "source", (v) => {
+                    // Viewer auto-follow: the mirror decision MUST be taken here, before the setW below
+                    // rewrites input_colorspace - fillRange's own prevInCs capture runs after that write and
+                    // so can never see the old value on this path (the bug that made the follow a no-op).
+                    const _pcs = W(this, "input_colorspace")?.value, _vcs = W(this, "colorspace_in")?.value;
+                    this.__ocioViewerMirrored = !!(_vcs && _vcs !== VIEW_NONE && _vcs === _pcs);
+                    setW(this, "input_colorspace", autoInCs(v)); fillRange(this, v); updateReadMeta(this);
+                });   // fillRange calls updateReadPreview once _ocioSeq is known
                 for (const w of ["input_colorspace", "output_colorspace", "raw_data"]) {
                     onChange(this, w, () => updateReadPreview(this));  // colorspace change -> re-render the thumb
                 }
@@ -2646,7 +2669,7 @@ app.registerExtension({
                 // Remember which auto-filled fields the artist edited, so a detect still in flight overwrites
                 // only the others (issue #3). The auto-fill itself writes through setWSilent, which fires no
                 // callback; a code-driven setW marks itself via _ocioAutoWrite. What reaches here is a real edit.
-                for (const w of ["frame_mode", "input_colorspace", "start_frame", "end_frame", "frame_shift", "fps"]) {
+                for (const w of ["frame_mode", "input_colorspace", "colorspace_in", "start_frame", "end_frame", "frame_shift", "fps"]) {
                     onChange(this, w, () => {
                         if (this._ocioAutoWrite) return;
                         (this._ocioEdited || (this._ocioEdited = new Set())).add(w);
@@ -2684,7 +2707,11 @@ app.registerExtension({
                 if (!a || !b) return;
                 ctx.save();
                 ctx.font = "10px sans-serif"; ctx.fillStyle = "#9cf"; ctx.textAlign = "right";
-                ctx.fillText(`${shorten(a.value)} → ${shorten(b.value)}`, this.size[0] - 8, -6);
+                // raw_data ON = the two combos are ignored and the pixels pass through untouched, so the
+                // honest label is "raw", not a conversion that is not happening (user-reported, 2026-08-25).
+                const rawW = W(this, "raw_data");
+                ctx.fillText((rawW && rawW.value) ? "raw (no conversion)"
+                             : `${shorten(a.value)} → ${shorten(b.value)}`, this.size[0] - 8, -66);
                 const seq = this._ocioSeq;
                 if (seq && seq.kind === "sequence") {
                     ctx.textAlign = "left"; ctx.font = "9px sans-serif";

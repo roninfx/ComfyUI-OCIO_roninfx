@@ -13,3 +13,7 @@ data/
 # local working dirs - never publish (logs and artifacts can carry paths and names from other work)
 scratchpad/
 .agents/
+
+# Local test footage and personal workflow files - never push these
+Playa Vista/
+CoSA_OCIO_*.json

@@ -1172,10 +1172,46 @@ class OCIOSwitchSelect:
         return (outer, inner, preset)
 
 
+
+class CoSAOCIOSourceTransform(OCIODisplay):
+    """CoSA OCIO Source Transform - OCIODisplay plus a `preset` combo (Manual/EXR/PNG/MP4) at the TOP.
+
+    The preset is FRONTEND-ONLY (ocio_display2_preset.js): picking EXR/PNG/MP4 writes ONLY the four
+    source-dependent widgets (in_colorspace, display, view, invert_direction) with the values validated
+    in the CoSA_OCIO workflows; everything else (out_colorspace, mix, config_path, preview...) is left
+    exactly as the user set it. Manual writes nothing. run() ignores the preset value entirely - the
+    real widgets always hold the truth, so the backend math is identical to OCIODisplay's.
+
+    NEW class on purpose (not a widget added to OCIODisplay): inserting `preset` at the top of the
+    parent would shift every widgets_values index in ALREADY-SAVED graphs (see the out_colorspace
+    comment above). A fresh type has no saved instances to corrupt.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        base = OCIODisplay.INPUT_TYPES()
+        req = {"preset": (["Manual", "EXR", "PNG", "MP4"], {"default": "Manual",
+                          "tooltip": "Source preset: sets in_colorspace/display/view/invert_direction only. "
+                                     "Everything else (out_colorspace, mix, ...) is never touched. Manual = hands off."})}
+        req.update(base["required"])
+        base["required"] = req
+        return base
+
+    def run(self, image=None, preset=None, in_colorspace=None, display=None, view=None, invert_direction=False,
+            mix=1.0, config_path=BUILTIN, video=None, out_colorspace=None, preview=True, preview_frame="0",
+            unique_id="0"):
+        # preset is display-side state only - drop it and run the parent's math unchanged.
+        return OCIODisplay.run(self, image=image, in_colorspace=in_colorspace, display=display, view=view,
+                               invert_direction=invert_direction, mix=mix, config_path=config_path, video=video,
+                               out_colorspace=out_colorspace, preview=preview, preview_frame=preview_frame,
+                               unique_id=unique_id)
+
+
 NODE_CLASS_MAPPINGS = {
     "OCIOColorSpace": OCIOColorSpace,
     "OCIOLogConvert": OCIOLogConvert,
     "OCIODisplay": OCIODisplay,
+    "CoSAOCIOSourceTransform": CoSAOCIOSourceTransform,
     "OCIOCDLTransform": OCIOCDLTransform,
     "OCIOFileTransform": OCIOFileTransform,
     "OCIOLookTransform": OCIOLookTransform,
@@ -1187,6 +1223,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "OCIOColorSpace": "OCIO ColorSpace",
     "OCIOLogConvert": "OCIO LogConvert",
     "OCIODisplay": "OCIO Display",
+    "CoSAOCIOSourceTransform": "CoSA OCIO Source Transform",
     "OCIOCDLTransform": "OCIO CDLTransform",
     "OCIOFileTransform": "OCIO FileTransform",
     "OCIOLookTransform": "OCIO LookTransform",

@@ -4288,4 +4288,4 @@ class OCIOPlayer:
 
 
 NODE_CLASS_MAPPINGS = {"OCIORead": OCIORead, "OCIOWrite": OCIOWrite, "OCIOPlayer": OCIOPlayer}
-NODE_DISPLAY_NAME_MAPPINGS = {"OCIORead": "OCIO Read", "OCIOWrite": "OCIO Write", "OCIOPlayer": "OCIO Player"}
+NODE_DISPLAY_NAME_MAPPINGS = {"OCIORead": "CoSA Read OCIO", "OCIOWrite": "OCIO Write", "OCIOPlayer": "OCIO Player"}
