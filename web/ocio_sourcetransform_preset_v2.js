@@ -104,6 +104,40 @@ app.registerExtension({
             return r;
         };
 
+        // CONNECT-TIME SENSING (2026-08-26, user-specified contract): the moment an image/video input is
+        // CONNECTED, sense the upstream CoSA Read's file type ONCE and switch the preset to match - even
+        // from Manual (Manual is the shipped default, so a fresh node must self-configure on first wiring).
+        // Never re-evaluated afterward: file swaps on the connected Read do NOT re-trigger (deliberate), and
+        // the user can flip back to Manual and it sticks until the next reconnection. Skipped during
+        // workflow load (app.configuringGraph), where LiteGraph replays connections and sensing would stomp
+        // every saved preset choice.
+        const EXT_PRESET = (ext) => {
+            if (["exr", "hdr"].includes(ext)) return "EXR";
+            if (["png", "jpg", "jpeg", "tif", "tiff"].includes(ext)) return "PNG";
+            if (["mp4", "mov", "mkv", "avi", "webm", "m4v", "mxf"].includes(ext)) return "MP4";
+            return null;
+        };
+        const prevConn = node.onConnectionsChange;
+        node.onConnectionsChange = function (type, slotIndex, connected, linkInfo, ioSlot) {
+            const r = prevConn ? prevConn.apply(this, arguments) : undefined;
+            try {
+                if (app.configuringGraph) return r;
+                if (!connected || type !== 1) return r;                      // 1 = INPUT
+                const name = ioSlot && ioSlot.name;
+                if (name !== "image" && name !== "video") return r;
+                const link = linkInfo || (this.graph && this.graph.links && this.graph.links[ioSlot.link]);
+                const origin = link && this.graph && this.graph.getNodeById(link.origin_id);
+                if (!origin || origin.type !== "OCIORead") return r;
+                const srcVal = String(W(origin, "source")?.value || "");
+                const ext = (srcVal.toLowerCase().split(".").pop() || "");
+                const wanted = EXT_PRESET(ext);
+                if (!wanted || preset.value === wanted) return r;
+                preset.value = wanted;
+                applyPreset(node, wanted);
+            } catch (e) { /* sensing must never break wiring */ }
+            return r;
+        };
+
         // Hand-editing a driven widget -> flip preset back to Manual (only when WE are not the writer).
         // Deliberately NOT applied on workflow load (loads restore saved values without callbacks firing).
         for (const key of DRIVEN) {
