@@ -1163,16 +1163,35 @@ async function fillRange(node, source, opts) {
             // and correctly dynamic; a real re-base is still exactly one field edit away, same as before.
             if (d.fps) put("fps", Math.round(d.fps * 1000) / 1000);
             if (d.input_cs) put("input_colorspace", d.input_cs);   // folder path has no ext -> fix EXR auto-detect (sRGB -> ACEScg) from the resolved first frame
-            // Viewer auto-follow (2026-08-25): a duplicated EXR Read pointed at a PNG/MP4 kept its viewer-LUT
-            // source override (colorspace_in) on the OLD file's space, so the preview showed the new file through
-            // the wrong LUT with no hint. When the override was mirroring input_colorspace, keep it mirroring.
-            if (d.input_cs) {
-                const csw = W(node, "colorspace_in");
-                const mirrored = (csw && csw.value === prevInCs) || node.__ocioViewerMirrored;
-                node.__ocioViewerMirrored = false;
-                if (applyValues && csw && csw.value && csw.value !== VIEW_NONE && mirrored
-                    && !(node._ocioEdited && node._ocioEdited.has("colorspace_in"))) {
-                    setWSilent(node, "colorspace_in", d.input_cs);
+            // VIEWER AUTO-FOLLOW (2026-08-26, recipe version - replaces the colorspace_in-only mirror).
+            // The viewer settings that show each source class correctly, VALIDATED by the user on their
+            // reference nodes (316 EXR / 317 PNG / 318 MP4): scene-linear sources view through the ACES SDR
+            // LUT forward; display-referred sources view through the SAME pair INVERTED with the sRGB-encoded
+            // source label. On a real file change, if the current viewer matches a known recipe (user hasn't
+            // customized), swap it to the new class's recipe; anything custom is never touched.
+            if (d.input_cs && applyValues) {
+                const RECIPES = {
+                    linear:  { colorspace_in: "ACEScg", view_display: "Rec.1886 Rec.709 - Display",
+                               view_transform: "ACES 1.0 - SDR Video", invert_direction: false },
+                    display: { colorspace_in: "sRGB Encoded Rec.709 (sRGB)", view_display: "Rec.1886 Rec.709 - Display",
+                               view_transform: "ACES 1.0 - SDR Video", invert_direction: true },
+                };
+                const classOf = (cs) => !cs ? null : (/- Display$/.test(String(cs)) ? "display" : "linear");
+                const newRec = RECIPES[classOf(d.input_cs)];
+                const cur = {
+                    colorspace_in: W(node, "colorspace_in")?.value,
+                    view_display: W(node, "view_display")?.value,
+                    view_transform: W(node, "view_transform")?.value,
+                    invert_direction: !!W(node, "invert_direction")?.value,
+                };
+                const matches = (r) => r && cur.colorspace_in === r.colorspace_in && cur.view_display === r.view_display
+                    && cur.view_transform === r.view_transform && cur.invert_direction === r.invert_direction;
+                const knownState = matches(RECIPES.linear) || matches(RECIPES.display);
+                if (newRec && knownState && !matches(newRec)) {
+                    setWSilent(node, "colorspace_in", newRec.colorspace_in);
+                    setWSilent(node, "view_display", newRec.view_display);
+                    setWSilent(node, "view_transform", newRec.view_transform);
+                    setWSilent(node, "invert_direction", newRec.invert_direction);
                 }
             }
             // the transport ruler + in/out span the REAL file frame count (authoritative), not video.duration
@@ -2716,14 +2735,7 @@ app.registerExtension({
                 metaToggle._ocioAlwaysVisible = true;
                 ensureReadMeta(this);                                             // the panel itself, under its button
                 this._ocioAllWidgets = this.widgets.slice();                      // full ordered list, captured once
-                onChange(this, "source", (v) => {
-                    // Viewer auto-follow: the mirror decision MUST be taken here, before the setW below
-                    // rewrites input_colorspace - fillRange's own prevInCs capture runs after that write and
-                    // so can never see the old value on this path (the bug that made the follow a no-op).
-                    const _pcs = W(this, "input_colorspace")?.value, _vcs = W(this, "colorspace_in")?.value;
-                    this.__ocioViewerMirrored = !!(_vcs && _vcs !== VIEW_NONE && _vcs === _pcs);
-                    setW(this, "input_colorspace", autoInCs(v)); fillRange(this, v); updateReadMeta(this);
-                });   // fillRange calls updateReadPreview once _ocioSeq is known
+                onChange(this, "source", (v) => { setW(this, "input_colorspace", autoInCs(v)); fillRange(this, v); updateReadMeta(this); });   // fillRange calls updateReadPreview once _ocioSeq is known; recipe-based viewer follow lives in fillRange
                 for (const w of ["input_colorspace", "output_colorspace", "raw_data"]) {
                     onChange(this, w, () => updateReadPreview(this));  // colorspace change -> re-render the thumb
                 }
