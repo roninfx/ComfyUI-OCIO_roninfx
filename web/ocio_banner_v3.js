@@ -25,13 +25,16 @@ app.registerExtension({
                 const w = BANNER_IMG.naturalWidth * scale;
                 const x = (this.size[0] - w) / 2;
                 ctx.save();
-                ctx.beginPath();
-                ctx.rect(0, BANNER_Y, this.size[0], BANNER_H);
-                ctx.clip();
-                ctx.imageSmoothingEnabled = true;
-                ctx.imageSmoothingQuality = "high";
-                ctx.drawImage(BANNER_IMG, x, BANNER_Y, w, BANNER_H);
-                ctx.restore();
+                try {
+                    ctx.beginPath();
+                    ctx.rect(0, BANNER_Y, this.size[0], BANNER_H);
+                    ctx.clip();
+                    ctx.imageSmoothingEnabled = true;
+                    ctx.imageSmoothingQuality = "high";
+                    ctx.drawImage(BANNER_IMG, x, BANNER_Y, w, BANNER_H);
+                } finally {
+                    ctx.restore();
+                }
             }
             return r;
         };

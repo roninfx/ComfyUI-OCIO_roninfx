@@ -2569,24 +2569,34 @@ function _fbDrawAll(canvas, ctx) {
             const bw = ((wdg.width != null ? wdg.width : node.size[0]) - m * 2);
             const bh = ((wdg.computedHeight != null ? wdg.computedHeight : 50) - m * 2);
             if (!(bw > 8 && bh > 8)) continue;
+            // try/finally, NOT try/catch, around save()/restore(): a drawImage() on a video/image mid-decode
+            // can throw synchronously (Safari especially), and catching that around a bare save()...restore()
+            // pair would skip the restore - leaving the canvas's save/clip stack permanently one level deep.
+            // That corruption compounds every frame this fires and desyncs hit-testing from what is drawn,
+            // which reads as "the mouse is stuck dragging a node that is not there" (user-reported, 2026-08-26,
+            // triggered by wheel-zooming over a Read node's banner/thumbnail). finally guarantees restore()
+            // runs even when the draw call inside throws.
             ctx.save();
-            ctx.fillStyle = "#111";
-            ctx.fillRect(bx, by, bw, bh);
-            const loadingImg = (srcEl.el === p.img) && !srcEl.el.complete;
-            if (loadingImg) {
-                if (!p.__fbWait) {
-                    p.__fbWait = true;
-                    const done = () => { p.__fbWait = false; node.setDirtyCanvas(true, true); };
-                    srcEl.el.addEventListener("load", done, { once: true });
-                    srcEl.el.addEventListener("error", done, { once: true });
+            try {
+                ctx.fillStyle = "#111";
+                ctx.fillRect(bx, by, bw, bh);
+                const loadingImg = (srcEl.el === p.img) && !srcEl.el.complete;
+                if (loadingImg) {
+                    if (!p.__fbWait) {
+                        p.__fbWait = true;
+                        const done = () => { p.__fbWait = false; node.setDirtyCanvas(true, true); };
+                        srcEl.el.addEventListener("load", done, { once: true });
+                        srcEl.el.addEventListener("error", done, { once: true });
+                    }
+                } else {
+                    const s = Math.min(bw / srcEl.w2, bh / srcEl.h2);
+                    const dw = srcEl.w2 * s, dh = srcEl.h2 * s;
+                    ctx.drawImage(srcEl.el, bx + (bw - dw) / 2, by + (bh - dh) / 2, dw, dh);
                 }
-            } else {
-                const s = Math.min(bw / srcEl.w2, bh / srcEl.h2);
-                const dw = srcEl.w2 * s, dh = srcEl.h2 * s;
-                ctx.drawImage(srcEl.el, bx + (bw - dw) / 2, by + (bh - dh) / 2, dw, dh);
+            } finally {
+                ctx.restore();
             }
-            ctx.restore();
-        } catch (e) { /* one bad node must not break the pass */ }
+        } catch (e) { /* one bad node must not break the pass - draw failure only, save/restore is already safe */ }
     }
 }
 function _fbEnsureHook() {
