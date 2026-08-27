@@ -2544,6 +2544,10 @@ async function ocioWriteRender(node) {
 // from the real DOM (getBoundingClientRect inverted through ds) while the box is visible, because the DOM
 // widget's last_y/y lies on this frontend (reported 572 for a box whose true top was ~380).
 function _fbDrawAll(canvas, ctx) {
+    // Emergency kill-switch: window.__cosaFbDisabled = true in the browser console instantly turns this
+    // whole zoom-out fallback off (no refresh needed) if it ever causes trouble again - the Read/Write
+    // viewport just goes back to disappearing at low zoom, same as before this feature existed.
+    if (window.__cosaFbDisabled) return;
     if (!canvas || !canvas.graph) return;
     const lowQ = !!(canvas.low_quality || (canvas.ds && canvas.ds.scale < 0.6));
     if (!lowQ) return;
@@ -2558,10 +2562,19 @@ function _fbDrawAll(canvas, ctx) {
             const all = [
                 cand(p.img, p.img.naturalWidth, p.img.naturalHeight, vis(p.img)),
                 cand(p.canvas, p.canvas.width, p.canvas.height, vis(p.canvas)),
-                cand(p.video, p.video.videoWidth, p.video.videoHeight, vis(p.video)),
+                // readyState >= 2 (HAVE_CURRENT_DATA): videoWidth/Height can report the PREVIOUS clip's
+                // dimensions for a frame or two right after a source change, before the decoder actually has
+                // a frame to hand drawImage - exactly the gap a wheel-zoom is likely to land in.
+                (p.video && p.video.readyState >= 2) ? cand(p.video, p.video.videoWidth, p.video.videoHeight, vis(p.video)) : null,
             ].filter(Boolean);
             const srcEl = all.find((c) => c.shown) || all[0];
             if (!srcEl) continue;
+            // Circuit breaker: a source that just failed to draw is skipped for a cooldown instead of
+            // retried every single frame (up to 60x/sec while zoomed out) - repeated throw-and-catch at that
+            // rate is its own performance problem even with save/restore now balanced (user report,
+            // 2026-08-26, persisted after the save/restore fix - this covers the "fails every frame" case
+            // the leak fix alone does not).
+            if (p.__fbCooldownUntil && performance.now() < p.__fbCooldownUntil) continue;
             // EXACTLY the rect the frontend positions the DOM widget with (GraphView updateWidgets):
             // pos = node.pos + margin (+ widget.y), size = (width ?? node width) - margin*2 by computedHeight - margin*2.
             const m = (wdg.margin != null) ? wdg.margin : 10;
@@ -2591,7 +2604,11 @@ function _fbDrawAll(canvas, ctx) {
                 } else {
                     const s = Math.min(bw / srcEl.w2, bh / srcEl.h2);
                     const dw = srcEl.w2 * s, dh = srcEl.h2 * s;
-                    ctx.drawImage(srcEl.el, bx + (bw - dw) / 2, by + (bh - dh) / 2, dw, dh);
+                    try {
+                        ctx.drawImage(srcEl.el, bx + (bw - dw) / 2, by + (bh - dh) / 2, dw, dh);
+                    } catch (drawErr) {
+                        p.__fbCooldownUntil = performance.now() + 500;   // stop hammering a source that just threw
+                    }
                 }
             } finally {
                 ctx.restore();
