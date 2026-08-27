@@ -2543,11 +2543,13 @@ async function ocioWriteRender(node) {
 // which runs after ALL nodes and widgets: nothing on the canvas can cover it. The viewport rect is measured
 // from the real DOM (getBoundingClientRect inverted through ds) while the box is visible, because the DOM
 // widget's last_y/y lies on this frontend (reported 572 for a box whose true top was ~380).
+// DISABLED BY DEFAULT (2026-08-26): a user hit a stuck-mouse/pointer-capture bug tied to this feature that
+// survived one root-cause fix (save/restore leak) and a second hardening pass (video readyState guard,
+// per-source drawImage cooldown) - defaulting OFF unblocks them with a plain refresh (no console access
+// needed, which was itself unavailable in their remote session) while this gets root-caused properly. Flip
+// window.__cosaFbEnabled = true in the console to opt back in for testing once a fix is confirmed.
 function _fbDrawAll(canvas, ctx) {
-    // Emergency kill-switch: window.__cosaFbDisabled = true in the browser console instantly turns this
-    // whole zoom-out fallback off (no refresh needed) if it ever causes trouble again - the Read/Write
-    // viewport just goes back to disappearing at low zoom, same as before this feature existed.
-    if (window.__cosaFbDisabled) return;
+    if (!window.__cosaFbEnabled) return;
     if (!canvas || !canvas.graph) return;
     const lowQ = !!(canvas.low_quality || (canvas.ds && canvas.ds.scale < 0.6));
     if (!lowQ) return;
