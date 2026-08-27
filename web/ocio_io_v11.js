@@ -2830,10 +2830,14 @@ app.registerExtension({
                 const _tag = (_ext && _ext.length <= 4) ? (_ext.toUpperCase() + " · ") : "";
                 ctx.fillText(_tag + ((rawW && rawW.value) ? "raw (no conversion)"
                              : `${shorten(a.value)} → ${shorten(b.value)}`), this.size[0] - 8, -66);
-                // Zoom-out fallback support: measure the viewport's TRUE node-local rect from the DOM while
-                // it is visible, and make sure the canvas-level draw hook is installed (the draw itself lives
-                // in _fbDrawAll - see its comment for why node-level drawing gets painted over).
-                try {
+                // Zoom-out fallback support - GATED (2026-08-26): this ran UNCONDITIONALLY even after the
+                // draw function itself (_fbDrawAll) was disabled by default, meaning EVERY Read/Write node
+                // was still doing two getBoundingClientRect() calls (a forced synchronous layout read) on
+                // EVERY canvas frame regardless of the flag. That is real layout-thrashing cost that scales
+                // with how many node viewports are active, which matches "worked for a while then froze" far
+                // better than a one-off corruption event - this was very likely the actual remaining cause
+                // after the draw-side fixes. Now a true no-op when the feature is off, same as the draw side.
+                if (window.__cosaFbEnabled) try {
                     _fbEnsureHook();
                     const p = this._ocioPrev, cvs = app.canvas;
                     const lowQ = !!(cvs && (cvs.low_quality || (cvs.ds && cvs.ds.scale < 0.6)));
