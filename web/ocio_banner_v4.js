@@ -13,6 +13,11 @@ BANNER_IMG.src = new URL("cosa_banner.png", import.meta.url).href;
 app.registerExtension({
     name: "ComfyUI-OCIO.read_banner",
     async nodeCreated(node) {
+        // DISABLED BY DEFAULT (2026-08-26): pulled back alongside the zoom-out fallback after a user hit a
+        // ComfyUI-wide freeze + canvas "burn-in" surviving a workflow switch - a symptom consistent with a
+        // leaked ctx.clip() (this draw's own), though not yet confirmed as the cause. No banner until this
+        // is root-caused; everything else (labels, sensing, presets) is untouched and still active.
+        if (!window.__cosaBannerEnabled) return;
         const _t = node?.comfyClass || node?.type;
         if (_t !== "OCIORead" && _t !== "OCIOWrite") return;
         if (node.__cosaBannerAdded) return;
