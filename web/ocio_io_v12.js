@@ -2819,17 +2819,20 @@ app.registerExtension({
                 if (this.flags && this.flags.collapsed) return;
                 const a = W(this, "input_colorspace"), b = W(this, "output_colorspace");
                 if (!a || !b) return;
-                ctx.save();
-                ctx.font = "12px sans-serif"; ctx.fillStyle = "#9cf"; ctx.textAlign = "right";
-                // raw_data ON = the two combos are ignored and the pixels pass through untouched, so the
-                // honest label is "raw", not a conversion that is not happening (user-reported, 2026-08-25).
-                const rawW = W(this, "raw_data");
-                // File type prefix (user request 2026-08-26): the loaded source's extension leads the label,
-                // so a Read announces WHAT it holds next to HOW it is converting it - "EXR · raw (no conversion)".
-                const _ext = (String(W(this, "source")?.value || "").toLowerCase().split(".").pop() || "");
-                const _tag = (_ext && _ext.length <= 4) ? (_ext.toUpperCase() + " · ") : "";
-                ctx.fillText(_tag + ((rawW && rawW.value) ? "raw (no conversion)"
-                             : `${shorten(a.value)} → ${shorten(b.value)}`), this.size[0] - 8, -66);
+                // Above-banner label DISABLED BY DEFAULT (2026-08-26): pulled back with the rest of
+                // today's draw hooks after the stuck-mouse/freeze issue persisted through two narrower
+                // fixes - full stop-loss on every onDrawForeground addition until root-caused, not just
+                // the ones already implicated. Flip window.__cosaLabelsEnabled = true to opt back in.
+                if (window.__cosaLabelsEnabled) {
+                    ctx.save();
+                    ctx.font = "12px sans-serif"; ctx.fillStyle = "#9cf"; ctx.textAlign = "right";
+                    const rawW = W(this, "raw_data");
+                    const _ext = (String(W(this, "source")?.value || "").toLowerCase().split(".").pop() || "");
+                    const _tag = (_ext && _ext.length <= 4) ? (_ext.toUpperCase() + " · ") : "";
+                    ctx.fillText(_tag + ((rawW && rawW.value) ? "raw (no conversion)"
+                                 : `${shorten(a.value)} → ${shorten(b.value)}`), this.size[0] - 8, -66);
+                    ctx.restore();
+                }
                 // Zoom-out fallback support - GATED (2026-08-26): this ran UNCONDITIONALLY even after the
                 // draw function itself (_fbDrawAll) was disabled by default, meaning EVERY Read/Write node
                 // was still doing two getBoundingClientRect() calls (a forced synchronous layout read) on
@@ -3011,9 +3014,13 @@ app.registerExtension({
                 const isVideo = W(this, "container")?.value === "video";
                 const ext = isVideo ? (CODEC_INFO[W(this, "video_codec")?.value]?.ext || ".mp4").slice(1)
                                     : (STILL_EXT[W(this, "still_format")?.value] || "exr");
-                ctx.save();
-                ctx.font = "12px sans-serif"; ctx.fillStyle = "#9cf"; ctx.textAlign = "right";
-                ctx.fillText(`${ext.toUpperCase()}: ${shorten(a.value)} → ${shorten(b.value)}`, this.size[0] - 8, -66);
+                // Above-banner label DISABLED BY DEFAULT (2026-08-26) - see the Read label's comment above.
+                if (window.__cosaLabelsEnabled) {
+                    ctx.save();
+                    ctx.font = "12px sans-serif"; ctx.fillStyle = "#9cf"; ctx.textAlign = "right";
+                    ctx.fillText(`${ext.toUpperCase()}: ${shorten(a.value)} → ${shorten(b.value)}`, this.size[0] - 8, -66);
+                    ctx.restore();
+                }
                 ctx.font = "9px sans-serif"; ctx.fillStyle = "#7a9"; ctx.textAlign = "left";
                 ctx.fillText("→ " + exampleName(this), 8, this.size[1] - 6);
                 if (W(this, "container")?.value === "video") {

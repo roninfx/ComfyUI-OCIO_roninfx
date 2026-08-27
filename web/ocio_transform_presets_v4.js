@@ -162,17 +162,18 @@ function installChainLabel(node) {
             parts = inv ? [stage, inCs] : [inCs, stage];
             if (hasOut) parts.push(shortenCs(out));
         }
-        ctx.save();
-        ctx.font = "12px sans-serif"; ctx.fillStyle = "#9cf"; ctx.textAlign = "right";
-        // Above the CoSA banner (banner spans y -60..-30, title bar -30..0): stacked label / banner / title,
-        // nothing overlapping. Bottom-of-node placement was tried on paper and rejected as too far from the eye.
-        // Preset name leads the label (user request 2026-08-26), same "what next to how" pattern as the Read
-        // node's file-type prefix - Manual is worth naming too, since it is the one state where the four
-        // driven fields could say ANYTHING and the label alone would not explain why.
-        const presetVal = val("preset");
-        const tag = presetVal ? `${presetVal}: ` : "";
-        ctx.fillText(tag + parts.join(" → "), this.size[0] - 8, -66);
-        ctx.restore();
+        // Above-banner chain label DISABLED BY DEFAULT (2026-08-26) - full stop-loss on every
+        // onDrawForeground addition from today, alongside the Read/Write labels and zoom-out fallback,
+        // after the stuck-mouse/freeze issue survived two narrower fixes. Flip
+        // window.__cosaLabelsEnabled = true to opt back in.
+        if (window.__cosaLabelsEnabled) {
+            ctx.save();
+            ctx.font = "12px sans-serif"; ctx.fillStyle = "#9cf"; ctx.textAlign = "right";
+            const presetVal = val("preset");
+            const tag = presetVal ? `${presetVal}: ` : "";
+            ctx.fillText(tag + parts.join(" → "), this.size[0] - 8, -66);
+            ctx.restore();
+        }
         return r;
     };
 }
